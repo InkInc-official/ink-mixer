@@ -1,0 +1,8 @@
+[package]
+name = "ink-mixer"
+description = "Ink Mixer: extensible real-time audio console for streamers"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]

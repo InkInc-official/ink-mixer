@@ -1,0 +1,8 @@
+[package]
+name = "ink-core"
+description = "Ink Mixer core: Audio Graph types and configuration"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
