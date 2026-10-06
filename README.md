@@ -12,7 +12,7 @@ Ink Mixer は、配信者向けの拡張可能なリアルタイム・オーデ�
 
 ### ステータス
 
-**Pre-alpha（Phase 0）** — リポジトリの骨格を作っている段階です。現在は起動メッセージを表示するだけで、音声処理はまだ実装されていません。
+**Pre-alpha（Phase 0 完了、Phase 1 準備中）** — `ink-mixer devices` で音声デバイスの一覧を表示できます。音声処理（マイクの入力や出力）はまだ実装されていません。
 
 今後の計画は [ROADMAP.md](ROADMAP.md) を参照してください。
 
@@ -42,7 +42,10 @@ sudo apt install libasound2-dev pkg-config
 ```bash
 cargo build
 cargo run -p ink-mixer
+cargo run -p ink-mixer -- devices
 ```
+
+`devices` は、音声の入力・出力デバイスの一覧を表示します（既定のデバイスには `[default]` が付きます）。
 
 ### ドキュメント
 
@@ -65,7 +68,7 @@ Ink Mixer is an extensible real-time audio console for streamers.
 
 ### Status
 
-**Pre-alpha (Phase 0)** — The repository skeleton is being built. The app currently only prints a startup message; audio processing is not implemented yet.
+**Pre-alpha (Phase 0 complete, preparing Phase 1)** — `ink-mixer devices` lists audio devices. Audio processing (microphone input and output) is not implemented yet.
 
 See [ROADMAP.md](ROADMAP.md) for the plan ahead.
 
@@ -95,7 +98,10 @@ sudo apt install libasound2-dev pkg-config
 ```bash
 cargo build
 cargo run -p ink-mixer
+cargo run -p ink-mixer -- devices
 ```
+
+`devices` lists audio input and output devices (the default device is marked `[default]`).
 
 ### Documentation
 
