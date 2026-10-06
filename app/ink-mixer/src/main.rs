@@ -1,6 +1,9 @@
 use std::io::IsTerminal;
+use std::path::PathBuf;
 
-use tracing::info;
+use directories::ProjectDirs;
+use ink_core::Config;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
@@ -19,4 +22,34 @@ fn main() {
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS
     );
+
+    let _config = load_config();
+}
+
+/// 設定ファイルの場所（OS 標準の設定ディレクトリ配下の `config.toml`）
+fn config_path() -> Option<PathBuf> {
+    ProjectDirs::from("", "Ink Inc", "Ink Mixer").map(|dirs| dirs.config_dir().join("config.toml"))
+}
+
+/// 設定を読み込む。無ければデフォルトで作成する。
+/// 読めないときは warn を出し、ファイルは書き換えずにデフォルト値で続行する。
+fn load_config() -> Config {
+    let Some(path) = config_path() else {
+        warn!("config directory not found; using default settings");
+        return Config::default();
+    };
+    match Config::load_or_create(&path) {
+        Ok(config) => {
+            info!(
+                "config loaded from {} (version {})",
+                path.display(),
+                config.version
+            );
+            config
+        }
+        Err(e) => {
+            warn!("{e} ({}); using default settings", path.display());
+            Config::default()
+        }
+    }
 }
