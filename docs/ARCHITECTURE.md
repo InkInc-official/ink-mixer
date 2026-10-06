@@ -1433,7 +1433,9 @@ docs/adr/
 ├─ 0001-rust-core.md
 ├─ 0002-audio-backend.md
 ├─ 0003-crate-dependency-direction.md
-└─ 0004-gui-framework.md
+├─ 0004-gui-framework.md
+├─ 0005-license.md
+└─ 0006-japanese-font.md
 ```
 
 今後の候補（番号は起票時に決める）: LV2 Host library、Plugin process isolation など。
