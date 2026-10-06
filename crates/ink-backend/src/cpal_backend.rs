@@ -68,8 +68,23 @@ impl CpalBackend {
             .id()
             .map_err(|e| BackendError::DeviceUnavailable(e.to_string()))?
             .to_string();
-        device_info(&device, id, direction)
+        let Some(info) = device_info(&device, id, direction)? else {
+            return Ok(None);
+        };
+        // cpal may name the default device differently from the same device
+        // in the list. If the list cannot be read, keep the default's name.
+        let listed = self.enumerate(direction).unwrap_or_default();
+        Ok(Some(use_listed_name(info, &listed)))
     }
+}
+
+/// Uses the name of the device with the same ID in `listed`, if any, so that
+/// one device is shown under one name.
+fn use_listed_name(mut info: DeviceInfo, listed: &[DeviceInfo]) -> DeviceInfo {
+    if let Some(same) = listed.iter().find(|d| d.id == info.id) {
+        info.name.clone_from(&same.name);
+    }
+    info
 }
 
 impl Default for CpalBackend {
@@ -270,6 +285,33 @@ mod tests {
         ] {
             assert!(!is_listed(id), "{id} should not be listed");
         }
+    }
+
+    fn info(id: &str, name: &str) -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId::new(id),
+            name: name.to_string(),
+            channels: 2,
+            sample_rates: vec![48_000],
+        }
+    }
+
+    #[test]
+    fn default_takes_the_name_from_the_list() {
+        let listed = [
+            info("alsa:pulse", "PulseAudio Sound Server"),
+            info("alsa:default", "Through the sound server"),
+        ];
+        let default = use_listed_name(info("alsa:default", "Default Audio Device"), &listed);
+        assert_eq!(default, info("alsa:default", "Through the sound server"));
+    }
+
+    #[test]
+    fn default_keeps_its_name_when_not_listed() {
+        let listed = [info("alsa:pulse", "PulseAudio Sound Server")];
+        let default = use_listed_name(info("alsa:default", "Default Audio Device"), &listed);
+        assert_eq!(default.name, "Default Audio Device");
+        assert_eq!(use_listed_name(default.clone(), &[]), default);
     }
 
     #[test]
