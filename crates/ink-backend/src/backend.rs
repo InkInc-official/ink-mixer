@@ -1,6 +1,9 @@
 //! The audio backend abstraction.
 
-use crate::{DeviceId, DeviceInfo, InputCallback, InputStream, Result, StreamConfig};
+use crate::{
+    DeviceId, DeviceInfo, InputCallback, InputStream, OutputCallback, OutputStream, Result,
+    StreamConfig,
+};
 
 /// Backend-independent access to the audio devices of the system.
 ///
@@ -55,6 +58,25 @@ pub trait AudioBackend {
         config: StreamConfig,
         callback: InputCallback,
     ) -> Result<InputStream>;
+
+    /// Opens and starts playing to the output device `device` with `config`.
+    ///
+    /// `callback` fills each block to be played on the audio thread (see
+    /// [`OutputCallback`]). The stream runs until the returned
+    /// [`OutputStream`] is dropped.
+    ///
+    /// # Errors
+    ///
+    /// - [`BackendError::DeviceUnavailable`](crate::BackendError::DeviceUnavailable)
+    ///   if the device is not found or cannot be opened.
+    /// - [`BackendError::UnsupportedConfig`](crate::BackendError::UnsupportedConfig)
+    ///   if the device does not support the sample rate and channel count.
+    fn open_output(
+        &self,
+        device: &DeviceId,
+        config: StreamConfig,
+        callback: OutputCallback,
+    ) -> Result<OutputStream>;
 }
 
 #[cfg(test)]
@@ -67,8 +89,9 @@ mod tests {
 
     /// A backend with one fixed output device and no listed input devices.
     ///
-    /// `open_input` accepts only [`FAKE_MIC`] and calls the callback once,
-    /// synchronously, with one frame per channel.
+    /// `open_input` accepts only [`FAKE_MIC`] and `open_output` only the
+    /// fake speaker; each calls the callback once, synchronously, with one
+    /// frame per channel.
     struct FakeBackend;
 
     const FAKE_MIC: &str = "fake:mic";
@@ -113,6 +136,22 @@ mod tests {
             status.record_callback(1);
             callback(&frame);
             Ok(InputStream::new(Box::new(()), status, config, "f32"))
+        }
+
+        fn open_output(
+            &self,
+            device: &DeviceId,
+            config: StreamConfig,
+            mut callback: OutputCallback,
+        ) -> Result<OutputStream> {
+            if *device != speaker().id {
+                return Err(BackendError::DeviceUnavailable(device.to_string()));
+            }
+            let status = Arc::new(StreamStatus::new());
+            let mut frame = vec![0.0; usize::from(config.channels)];
+            status.record_callback(1);
+            callback(&mut frame);
+            Ok(OutputStream::new(Box::new(()), status, config, "f32"))
         }
     }
 
@@ -161,6 +200,44 @@ mod tests {
             channels: 1,
         };
         let result = FakeBackend.open_input(&DeviceId::new("fake:none"), config, Box::new(|_| {}));
+        assert!(matches!(result, Err(BackendError::DeviceUnavailable(_))));
+    }
+
+    #[test]
+    fn open_output_through_trait_object() {
+        let backend: Box<dyn AudioBackend> = Box::new(FakeBackend);
+        let given = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&given);
+        let config = StreamConfig {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+
+        let stream = backend
+            .open_output(
+                &speaker().id,
+                config,
+                Box::new(move |buffer: &mut [f32]| {
+                    seen.lock().unwrap().extend_from_slice(buffer);
+                    buffer.fill(0.5);
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(stream.config(), config);
+        assert_eq!(stream.callbacks(), 1);
+        assert_eq!(stream.error(), None);
+        // The callback gets a silent buffer with one frame of two channels.
+        assert_eq!(*given.lock().unwrap(), vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn open_output_unknown_device_is_unavailable() {
+        let config = StreamConfig {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+        let result = FakeBackend.open_output(&DeviceId::new("fake:none"), config, Box::new(|_| {}));
         assert!(matches!(result, Err(BackendError::DeviceUnavailable(_))));
     }
 

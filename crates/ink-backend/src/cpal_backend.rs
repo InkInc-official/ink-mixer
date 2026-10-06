@@ -12,8 +12,8 @@ use tracing::debug;
 
 use crate::stream::StreamStatus;
 use crate::{
-    AudioBackend, BackendError, DeviceId, DeviceInfo, InputCallback, InputStream,
-    MAX_FRAMES_PER_CALLBACK, Result, StreamConfig, StreamError,
+    AudioBackend, AudioStream, BackendError, DeviceId, DeviceInfo, InputCallback, InputStream,
+    MAX_FRAMES_PER_CALLBACK, OutputCallback, OutputStream, Result, StreamConfig, StreamError,
 };
 
 /// Audio backend using the OS default `cpal` host
@@ -102,72 +102,89 @@ impl CpalBackend {
             .ok_or_else(|| BackendError::DeviceUnavailable(format!("{id}: not found")))
     }
 
-    fn open_input_stream(
+    /// Finds the device and the sample format for opening a stream with
+    /// `config` in `direction`.
+    fn prepare(
         &self,
         id: &DeviceId,
         config: StreamConfig,
-        callback: InputCallback,
-    ) -> Result<InputStream> {
+        direction: Direction,
+    ) -> Result<(cpal::Device, SampleFormat, cpal::StreamConfig)> {
         let device = self.find_device(id)?;
-        let ranges: Vec<FormatRange> = device
-            .supported_input_configs()
-            .map_err(|e| BackendError::DeviceUnavailable(format!("{id}: {e}")))?
-            .map(|r| FormatRange {
-                channels: r.channels(),
-                min_rate: r.min_sample_rate(),
-                max_rate: r.max_sample_rate(),
-                format: r.sample_format(),
-            })
-            .collect();
+        let ranges = supported_ranges(&device, direction)
+            .map_err(|e| BackendError::DeviceUnavailable(format!("{id}: {e}")))?;
         let format = choose_format(&ranges, config).ok_or_else(|| {
             BackendError::UnsupportedConfig(format!(
                 "{id}: {} Hz, {} ch is not supported",
                 config.sample_rate, config.channels
             ))
         })?;
-
         let stream_config = cpal::StreamConfig {
             channels: config.channels,
             sample_rate: config.sample_rate,
             buffer_size: cpal::BufferSize::Default,
         };
+        Ok((device, format, stream_config))
+    }
+
+    fn open_input_stream(
+        &self,
+        id: &DeviceId,
+        config: StreamConfig,
+        callback: InputCallback,
+    ) -> Result<InputStream> {
+        let (device, format, stream_config) = self.prepare(id, config, Direction::Input)?;
         let status = Arc::new(StreamStatus::new());
         let channels = usize::from(config.channels);
         let s = Arc::clone(&status);
+        let (d, c, cb) = (&device, &stream_config, callback);
 
         let stream = match format {
-            SampleFormat::F32 => build_f32(&device, &stream_config, channels, s, callback),
-            SampleFormat::F64 => build::<f64>(&device, &stream_config, channels, s, callback),
-            SampleFormat::I8 => build::<i8>(&device, &stream_config, channels, s, callback),
-            SampleFormat::I16 => build::<i16>(&device, &stream_config, channels, s, callback),
-            SampleFormat::I24 => build::<I24>(&device, &stream_config, channels, s, callback),
-            SampleFormat::I32 => build::<i32>(&device, &stream_config, channels, s, callback),
-            SampleFormat::I64 => build::<i64>(&device, &stream_config, channels, s, callback),
-            SampleFormat::U8 => build::<u8>(&device, &stream_config, channels, s, callback),
-            SampleFormat::U16 => build::<u16>(&device, &stream_config, channels, s, callback),
-            SampleFormat::U24 => build::<U24>(&device, &stream_config, channels, s, callback),
-            SampleFormat::U32 => build::<u32>(&device, &stream_config, channels, s, callback),
-            SampleFormat::U64 => build::<u64>(&device, &stream_config, channels, s, callback),
-            // `choose_format` only returns formats from `PREFERRED_FORMATS`.
-            other => {
-                return Err(BackendError::UnsupportedConfig(format!(
-                    "{id}: sample format {other} is not supported"
-                )));
-            }
-        }
-        .map_err(|e| open_error(id, &e))?;
+            SampleFormat::F32 => build_input_f32(d, c, channels, s, cb),
+            SampleFormat::F64 => build_input::<f64>(d, c, channels, s, cb),
+            SampleFormat::I8 => build_input::<i8>(d, c, channels, s, cb),
+            SampleFormat::I16 => build_input::<i16>(d, c, channels, s, cb),
+            SampleFormat::I24 => build_input::<I24>(d, c, channels, s, cb),
+            SampleFormat::I32 => build_input::<i32>(d, c, channels, s, cb),
+            SampleFormat::I64 => build_input::<i64>(d, c, channels, s, cb),
+            SampleFormat::U8 => build_input::<u8>(d, c, channels, s, cb),
+            SampleFormat::U16 => build_input::<u16>(d, c, channels, s, cb),
+            SampleFormat::U24 => build_input::<U24>(d, c, channels, s, cb),
+            SampleFormat::U32 => build_input::<u32>(d, c, channels, s, cb),
+            SampleFormat::U64 => build_input::<u64>(d, c, channels, s, cb),
+            other => return Err(unsupported_format(id, other)),
+        };
+        start(id, stream, status, config, format, Direction::Input)
+    }
 
-        stream.play().map_err(|e| open_error(id, &e))?;
-        debug!(
-            "input stream opened: {id}, {} Hz, {} ch, {format}",
-            config.sample_rate, config.channels
-        );
-        Ok(InputStream::new(
-            Box::new(stream),
-            status,
-            config,
-            format_name(format),
-        ))
+    fn open_output_stream(
+        &self,
+        id: &DeviceId,
+        config: StreamConfig,
+        callback: OutputCallback,
+    ) -> Result<OutputStream> {
+        let (device, format, stream_config) = self.prepare(id, config, Direction::Output)?;
+        let status = Arc::new(StreamStatus::new());
+        let channels = usize::from(config.channels);
+        let s = Arc::clone(&status);
+        let (d, c, cb) = (&device, &stream_config, callback);
+
+        let stream = match format {
+            SampleFormat::F32 => build_output_f32(d, c, channels, s, cb),
+            SampleFormat::F64 => build_output::<f64>(d, c, channels, s, cb),
+            SampleFormat::I8 => build_output::<i8>(d, c, channels, s, cb),
+            SampleFormat::I16 => build_output::<i16>(d, c, channels, s, cb),
+            SampleFormat::I24 => build_output::<I24>(d, c, channels, s, cb),
+            SampleFormat::I32 => build_output::<i32>(d, c, channels, s, cb),
+            SampleFormat::I64 => build_output::<i64>(d, c, channels, s, cb),
+            SampleFormat::U8 => build_output::<u8>(d, c, channels, s, cb),
+            SampleFormat::U16 => build_output::<u16>(d, c, channels, s, cb),
+            SampleFormat::U24 => build_output::<U24>(d, c, channels, s, cb),
+            SampleFormat::U32 => build_output::<u32>(d, c, channels, s, cb),
+            SampleFormat::U64 => build_output::<u64>(d, c, channels, s, cb),
+            other => return Err(unsupported_format(id, other)),
+        };
+        start(id, stream, status, config, format, Direction::Output)
     }
 
     /// Returns the name that the device list shows for `id`.
@@ -231,6 +248,60 @@ impl AudioBackend for CpalBackend {
     ) -> Result<InputStream> {
         self.open_input_stream(device, config, callback)
     }
+
+    fn open_output(
+        &self,
+        device: &DeviceId,
+        config: StreamConfig,
+        callback: OutputCallback,
+    ) -> Result<OutputStream> {
+        self.open_output_stream(device, config, callback)
+    }
+}
+
+/// Collects the supported configuration ranges of `device` in `direction`.
+fn supported_ranges(
+    device: &cpal::Device,
+    direction: Direction,
+) -> std::result::Result<Vec<FormatRange>, cpal::Error> {
+    let to_range = |r: cpal::SupportedStreamConfigRange| FormatRange {
+        channels: r.channels(),
+        min_rate: r.min_sample_rate(),
+        max_rate: r.max_sample_rate(),
+        format: r.sample_format(),
+    };
+    Ok(match direction {
+        Direction::Input => device.supported_input_configs()?.map(to_range).collect(),
+        Direction::Output => device.supported_output_configs()?.map(to_range).collect(),
+    })
+}
+
+/// Starts a built stream and wraps it in a handle.
+fn start<D>(
+    id: &DeviceId,
+    stream: std::result::Result<cpal::Stream, cpal::Error>,
+    status: Arc<StreamStatus>,
+    config: StreamConfig,
+    format: SampleFormat,
+    direction: Direction,
+) -> Result<AudioStream<D>> {
+    let stream = stream.map_err(|e| open_error(id, &e))?;
+    stream.play().map_err(|e| open_error(id, &e))?;
+    debug!(
+        "{direction:?} stream opened: {id}, {} Hz, {} ch, {format}",
+        config.sample_rate, config.channels
+    );
+    Ok(AudioStream::new(
+        Box::new(stream),
+        status,
+        config,
+        format_name(format),
+    ))
+}
+
+/// The error for a sample format that `choose_format` never returns.
+fn unsupported_format(id: &DeviceId, format: SampleFormat) -> BackendError {
+    BackendError::UnsupportedConfig(format!("{id}: sample format {format} is not supported"))
 }
 
 /// One supported configuration range of a device, reduced to what is needed
@@ -295,7 +366,7 @@ fn format_name(format: SampleFormat) -> &'static str {
 }
 
 /// Builds an input stream for f32 samples, which are passed on unchanged.
-fn build_f32(
+fn build_input_f32(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     channels: usize,
@@ -318,7 +389,7 @@ fn build_f32(
 }
 
 /// Builds an input stream for samples of type `T`, converted to f32.
-fn build<T>(
+fn build_input<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     channels: usize,
@@ -377,6 +448,124 @@ fn deliver_chunks<T>(
             *o = f32::from_sample(sample);
         }
         callback(out);
+    }
+}
+
+/// Builds an output stream for f32 samples, which the callback writes
+/// directly.
+fn build_output_f32(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: usize,
+    status: Arc<StreamStatus>,
+    mut callback: OutputCallback,
+) -> std::result::Result<cpal::Stream, cpal::Error> {
+    let error_status = Arc::clone(&status);
+    device.build_output_stream::<f32, _, _>(
+        *config,
+        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            // Audio thread: no allocation, locking, or logging.
+            status.record_callback(data.len() / channels);
+            render_f32(&status, data, channels, &mut callback);
+        },
+        move |error: cpal::Error| handle_stream_error(&error_status, error.kind()),
+        None,
+    )
+}
+
+/// Builds an output stream for samples of type `T`, converted from f32.
+fn build_output<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    channels: usize,
+    status: Arc<StreamStatus>,
+    mut callback: OutputCallback,
+) -> std::result::Result<cpal::Stream, cpal::Error>
+where
+    T: SizedSample + FromSample<f32>,
+{
+    // Allocated here, outside the audio thread, and moved into the callback.
+    let mut buffer = vec![0.0_f32; MAX_FRAMES_PER_CALLBACK * channels];
+    let error_status = Arc::clone(&status);
+    device.build_output_stream::<T, _, _>(
+        *config,
+        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            // Audio thread: no allocation, locking, or logging.
+            status.record_callback(data.len() / channels);
+            render_converted(&status, data, channels, &mut buffer, &mut callback);
+        },
+        move |error: cpal::Error| handle_stream_error(&error_status, error.kind()),
+        None,
+    )
+}
+
+/// Fills f32 device `data` from `callback` in chunks of at most
+/// [`MAX_FRAMES_PER_CALLBACK`] frames.
+///
+/// Each chunk is silenced before the callback and limited after it (see
+/// [`limit`]). After a fatal error the callback is not called and `data` is
+/// silent.
+fn render_f32(
+    status: &StreamStatus,
+    data: &mut [f32],
+    channels: usize,
+    callback: &mut dyn FnMut(&mut [f32]),
+) {
+    if status.has_error() {
+        data.fill(0.0);
+        return;
+    }
+    for chunk in data.chunks_mut(MAX_FRAMES_PER_CALLBACK * channels) {
+        chunk.fill(0.0);
+        callback(chunk);
+        limit(chunk);
+    }
+}
+
+/// Fills device `data` of type `T` from `callback` through the f32
+/// `buffer`, in chunks of at most `buffer.len() / channels` frames.
+///
+/// Each chunk is silenced before the callback, limited after it (see
+/// [`limit`]), and converted to `T`. After a fatal error the callback is not
+/// called and `data` is silent (`T::EQUILIBRIUM`, for example 32768 for
+/// u16). Does not allocate: `buffer` is prepared by the caller.
+fn render_converted<T>(
+    status: &StreamStatus,
+    data: &mut [T],
+    channels: usize,
+    buffer: &mut [f32],
+    callback: &mut dyn FnMut(&mut [f32]),
+) where
+    T: Sample + FromSample<f32>,
+{
+    let chunk_len = buffer.len() / channels * channels;
+    if status.has_error() || chunk_len == 0 {
+        data.fill(T::EQUILIBRIUM);
+        return;
+    }
+    for chunk in data.chunks_mut(chunk_len) {
+        let samples = &mut buffer[..chunk.len()];
+        samples.fill(0.0);
+        callback(samples);
+        limit(samples);
+        for (out, &sample) in chunk.iter_mut().zip(samples.iter()) {
+            *out = T::from_sample(sample);
+        }
+    }
+}
+
+/// Makes samples safe to send to a device: NaN and infinity become 0, and
+/// other values are limited to -1.0..=1.0.
+///
+/// This is a last safety net against loud noise, not a limiter: the signal
+/// is cut off hard. Level control belongs to the limiter (Phase 3).
+fn limit(samples: &mut [f32]) {
+    for sample in samples {
+        *sample = if sample.is_finite() {
+            sample.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
     }
 }
 
@@ -823,5 +1012,132 @@ mod tests {
         handle_stream_error(&status, ErrorKind::DeviceNotAvailable);
         handle_stream_error(&status, ErrorKind::BackendError);
         assert_eq!(status.error(), Some(StreamError::DeviceUnavailable));
+    }
+
+    fn output_chunks<T: Copy>(
+        status: &StreamStatus,
+        data: &mut [T],
+        channels: usize,
+        render: impl FnOnce(&StreamStatus, &mut [T], &mut dyn FnMut(&mut [f32])),
+    ) -> Vec<usize> {
+        let mut frames = Vec::new();
+        render(status, data, &mut |chunk: &mut [f32]| {
+            frames.push(chunk.len() / channels);
+        });
+        frames
+    }
+
+    #[test]
+    fn output_large_block_is_split_without_growing_buffer() {
+        let channels = 2;
+        let mut data = vec![0_i16; 10_000 * channels];
+        let mut buffer = vec![0.0_f32; MAX_FRAMES_PER_CALLBACK * channels];
+        let capacity = buffer.capacity();
+        let status = StreamStatus::new();
+
+        let frames = output_chunks(&status, &mut data, channels, |s, d, cb| {
+            render_converted(s, d, channels, &mut buffer, cb);
+        });
+
+        assert_eq!(frames, vec![4096, 4096, 1808]);
+        assert_eq!(buffer.capacity(), capacity);
+    }
+
+    #[test]
+    fn output_f32_is_converted_to_device_format() {
+        let status = StreamStatus::new();
+        let mut buffer = vec![0.0_f32; 8];
+        let values = [1.0, -1.0, 0.0, 2.0];
+
+        let mut data = [7_i16; 4];
+        render_converted(
+            &status,
+            &mut data,
+            1,
+            &mut buffer,
+            &mut |b: &mut [f32]| {
+                b.copy_from_slice(&values);
+            },
+        );
+        assert_eq!(data, [i16::MAX, i16::MIN, 0, i16::MAX]);
+
+        let mut data = [7_u16; 1];
+        render_converted(
+            &status,
+            &mut data,
+            1,
+            &mut buffer,
+            &mut |b: &mut [f32]| {
+                b[0] = 0.0;
+            },
+        );
+        assert_eq!(data, [32_768]);
+    }
+
+    #[test]
+    fn output_samples_not_written_are_silent() {
+        let status = StreamStatus::new();
+        let mut buffer = vec![0.0_f32; 8];
+        let first_only = |b: &mut [f32]| b[0] = 0.5;
+
+        let mut data = [7_i16; 4];
+        render_converted(&status, &mut data, 1, &mut buffer, &mut { first_only });
+        assert_eq!(&data[1..], &[0, 0, 0]);
+
+        let mut data = [7_u16; 4];
+        render_converted(&status, &mut data, 1, &mut buffer, &mut { first_only });
+        assert_eq!(&data[1..], &[32_768, 32_768, 32_768]);
+
+        let mut data = [9.0_f32; 4];
+        render_f32(&status, &mut data, 1, &mut |_: &mut [f32]| {});
+        assert_eq!(data, [0.0; 4]);
+    }
+
+    #[test]
+    fn output_values_are_limited_before_the_device() {
+        let status = StreamStatus::new();
+        let mut data = [0.0_f32; 5];
+        render_f32(&status, &mut data, 1, &mut |b: &mut [f32]| {
+            b.copy_from_slice(&[2.0, -3.0, f32::NAN, f32::INFINITY, 0.25]);
+        });
+        assert_eq!(data, [1.0, -1.0, 0.0, 0.0, 0.25]);
+
+        let mut buffer = vec![0.0_f32; 8];
+        let mut data = [0_i16; 2];
+        render_converted(
+            &status,
+            &mut data,
+            1,
+            &mut buffer,
+            &mut |b: &mut [f32]| {
+                b.copy_from_slice(&[f32::NAN, f32::NEG_INFINITY]);
+            },
+        );
+        assert_eq!(data, [0, 0]);
+    }
+
+    #[test]
+    fn output_is_silent_after_fatal_error() {
+        let status = StreamStatus::new();
+        status.set_error(StreamError::DeviceUnavailable);
+        let mut called = false;
+
+        let mut data = [9.0_f32; 4];
+        render_f32(&status, &mut data, 1, &mut |_: &mut [f32]| called = true);
+        assert_eq!(data, [0.0; 4]);
+
+        let mut buffer = vec![0.0_f32; 8];
+        let mut data = [7_u16; 4];
+        render_converted(
+            &status,
+            &mut data,
+            1,
+            &mut buffer,
+            &mut |_: &mut [f32]| {
+                called = true;
+            },
+        );
+        assert_eq!(data, [32_768; 4]);
+        assert!(!called, "the callback must not run after a fatal error");
     }
 }

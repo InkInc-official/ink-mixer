@@ -1,9 +1,10 @@
 //! Backend-independent stream types.
 //!
 //! No `cpal` type appears here: a backend keeps its own stream object inside
-//! [`InputStream`] as an opaque box.
+//! [`AudioStream`] as an opaque box.
 
 use std::fmt;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
@@ -16,7 +17,8 @@ pub struct StreamConfig {
     pub channels: u16,
 }
 
-/// The largest number of frames passed to an [`InputCallback`] in one call.
+/// The largest number of frames passed to an [`InputCallback`] or an
+/// [`OutputCallback`] in one call.
 ///
 /// A larger block from the device is split into calls of at most this many
 /// frames, so the callback can work with buffers allocated in advance.
@@ -29,6 +31,18 @@ pub const MAX_FRAMES_PER_CALLBACK: usize = 4096;
 /// Runs on the audio thread: it must not allocate, block, or log
 /// (AGENTS.md §5).
 pub type InputCallback = Box<dyn FnMut(&[f32]) + Send + 'static>;
+
+/// Fills a buffer of interleaved f32 samples with [`StreamConfig::channels`]
+/// channels to be played, at most [`MAX_FRAMES_PER_CALLBACK`] frames per
+/// call.
+///
+/// The buffer is silent (all 0.0) when passed in, so samples the callback
+/// does not write stay silent. Before reaching the device, NaN and infinity
+/// become 0 and other values are limited to -1.0..=1.0.
+///
+/// Runs on the audio thread: it must not allocate, block, or log
+/// (AGENTS.md §5).
+pub type OutputCallback = Box<dyn FnMut(&mut [f32]) + Send + 'static>;
 
 /// A fatal error of a running stream. After it, the stream delivers no more
 /// data and should be dropped.
@@ -141,24 +155,42 @@ impl StreamStatus {
     }
 }
 
-/// An open input stream. Capturing stops when it is dropped.
+/// Marks an [`AudioStream`] that captures audio (an input stream).
+#[derive(Debug)]
+pub enum Capture {}
+
+/// Marks an [`AudioStream`] that plays audio (an output stream).
+#[derive(Debug)]
+pub enum Playback {}
+
+/// An open input stream.
+pub type InputStream = AudioStream<Capture>;
+
+/// An open output stream.
+pub type OutputStream = AudioStream<Playback>;
+
+/// An open audio stream. It stops when dropped.
+///
+/// Use it as [`InputStream`] or [`OutputStream`]: the direction is part of
+/// the type, so an input and an output cannot be mixed up.
 ///
 /// Create it on a control thread (the main thread of the CLI, the UI thread
 /// of the GUI) and keep it there; it is `Send`, so it can also be moved to
 /// another thread. To change devices, drop it and open a new one.
 ///
-/// Check [`InputStream::error`] and [`InputStream::callbacks`] regularly:
+/// Check [`AudioStream::error`] and [`AudioStream::callbacks`] regularly:
 /// some systems stop calling back without reporting an error when a device
 /// is unplugged.
-pub struct InputStream {
+pub struct AudioStream<D> {
     /// The backend's stream object. Dropping it stops the stream.
     _stream: Box<dyn Send>,
     status: Arc<StreamStatus>,
     config: StreamConfig,
     sample_format: &'static str,
+    _direction: PhantomData<fn() -> D>,
 }
 
-impl InputStream {
+impl<D> AudioStream<D> {
     /// `sample_format` is the device's sample format as a short name such as
     /// `"f32"` or `"i16"`.
     pub(crate) fn new(
@@ -172,6 +204,7 @@ impl InputStream {
             status,
             config,
             sample_format,
+            _direction: PhantomData,
         }
     }
 
@@ -180,8 +213,9 @@ impl InputStream {
         self.config
     }
 
-    /// Returns the sample format delivered by the device, such as `"f32"`
-    /// or `"i16"`, before conversion to f32. For display and diagnostics.
+    /// Returns the sample format of the device, such as `"f32"` or
+    /// `"i16"`. Samples are converted between it and f32. For display and
+    /// diagnostics.
     pub fn sample_format(&self) -> &'static str {
         self.sample_format
     }
@@ -197,7 +231,7 @@ impl InputStream {
     }
 
     /// Returns how many data callbacks the device has made. If this stops
-    /// increasing while the stream is open, the input has stopped.
+    /// increasing while the stream is open, the stream has stopped.
     pub fn callbacks(&self) -> u64 {
         self.status.callbacks()
     }
@@ -215,9 +249,9 @@ impl InputStream {
     }
 }
 
-impl fmt::Debug for InputStream {
+impl<D> fmt::Debug for AudioStream<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("InputStream")
+        f.debug_struct("AudioStream")
             .field("config", &self.config)
             .field("sample_format", &self.sample_format)
             .field("status", &self.status)
@@ -225,12 +259,13 @@ impl fmt::Debug for InputStream {
     }
 }
 
-// An `InputStream` must be movable between control threads (#41). Boxing the
+// Streams must be movable between control threads (#41). Boxing the
 // backend's stream as `dyn Send` already requires the stream to be `Send`;
 // this keeps the whole handle `Send` as fields are added.
 const _: () = {
     const fn assert_send<T: Send>() {}
     assert_send::<InputStream>();
+    assert_send::<OutputStream>();
 };
 
 #[cfg(test)]
@@ -286,10 +321,9 @@ mod tests {
         assert!(status.realtime_denied());
     }
 
-    #[test]
-    fn handle_reports_status_and_config() {
+    fn check_handle_reports_status_and_config<D>() {
         let status = Arc::new(StreamStatus::new());
-        let stream = InputStream::new(Box::new(()), Arc::clone(&status), CONFIG, "i16");
+        let stream = AudioStream::<D>::new(Box::new(()), Arc::clone(&status), CONFIG, "i16");
         status.record_callback(256);
         status.set_error(StreamError::PermissionDenied);
 
@@ -301,7 +335,12 @@ mod tests {
     }
 
     #[test]
-    fn dropping_handle_drops_backend_stream() {
+    fn handle_reports_status_and_config() {
+        check_handle_reports_status_and_config::<Capture>();
+        check_handle_reports_status_and_config::<Playback>();
+    }
+
+    fn check_dropping_handle_drops_backend_stream<D>() {
         struct Flag(Arc<AtomicBool>);
         impl Drop for Flag {
             fn drop(&mut self) {
@@ -310,7 +349,7 @@ mod tests {
         }
 
         let dropped = Arc::new(AtomicBool::new(false));
-        let stream = InputStream::new(
+        let stream = AudioStream::<D>::new(
             Box::new(Flag(Arc::clone(&dropped))),
             Arc::new(StreamStatus::new()),
             CONFIG,
@@ -319,5 +358,11 @@ mod tests {
         assert!(!dropped.load(Ordering::Relaxed));
         drop(stream);
         assert!(dropped.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn dropping_handle_drops_backend_stream() {
+        check_dropping_handle_drops_backend_stream::<Capture>();
+        check_dropping_handle_drops_backend_stream::<Playback>();
     }
 }
