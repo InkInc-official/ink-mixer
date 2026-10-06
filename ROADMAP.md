@@ -116,6 +116,8 @@ MIC -> Gain -> MASTER -> Output
 - latency handling
 - VST3 / LADSPA の調査
 - Ink Mixer Plugin SDK
+- LV2 プラグインの同梱（プラグインごとのライセンス確認と、ソースの入手方法の提示が前提）
+- プラグインをダウンロードできる仕組み（検討）
 
 ### 初期版でやらないこと
 
@@ -246,6 +248,8 @@ The first goal is to safely insert one simple LV2 effect into the graph, then ex
 - Latency handling
 - VST3 / LADSPA investigation
 - Ink Mixer Plugin SDK
+- Bundling LV2 plugins (requires checking each plugin's license and providing how to get its source)
+- A way to download plugins (under consideration)
 
 ### Out of scope for the first releases
 
