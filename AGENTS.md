@@ -26,7 +26,7 @@ Ink Mixer は、配信者向けの拡張可能なリアルタイム・オーデ�
 | 創作PC（MODICIA O.S. / Debian系 / X11 / RAM 8GB） | メイン開発機。Linux実機検証。LV2資産（`~/.local/lib/lv2/`）あり |
 | Windows機 | Windows / WASAPI 実機検証 |
 
-- 創作PCはRAM 8GBのため、ビルドの並列数を抑える（`.cargo/config.toml` で `jobs = 2` を目安）。
+- 創作PCはRAM 8GBのため、ビルドの並列数を抑える（創作PCのユーザー設定 `~/.cargo/config.toml` で `jobs = 2` を設定する。リポジトリには置かない）。
 - 重いビルドや大量の依存追加を行う前に、所長へ確認すること。
 
 ---

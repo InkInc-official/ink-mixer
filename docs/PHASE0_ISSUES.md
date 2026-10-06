@@ -15,7 +15,7 @@ GUIフレームワークは未決のため、Phase 0はCLIで動作確認する�
   - `crates/ink-core` — Audio Graphの型、設定など
   - `crates/ink-backend` — 音声I/Oの抽象と実装
   - `app/ink-mixer` — 実行ファイル
-- `.cargo/config.toml` でビルド並列数を2に制限（創作PC 8GB対策）
+- ビルド並列数の制限（`jobs = 2`）は創作PCのユーザー設定 `~/.cargo/config.toml` で行う（リポジトリには置かない。創作PC 8GB対策）
 - `.gitignore`
 
 **完了条件**

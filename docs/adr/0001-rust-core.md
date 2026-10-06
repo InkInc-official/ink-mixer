@@ -41,6 +41,6 @@ Python・GoはGCの影響でRealtimeパスに向かない。
 
 ## Consequences
 
-- コンパイル時間が長く、創作PC（RAM 8GB）ではビルド並列数の制限が必要
+- コンパイル時間が長く、創作PC（RAM 8GB）ではビルド並列数の制限が必要（創作PCのユーザー設定 `~/.cargo/config.toml` で `jobs = 2` を設定し、リポジトリには置かない）
 - 借用チェッカーの制約により、Audio Graphの所有権設計に事前の検討が要る
 - Python連携が必要になった時点で、PyO3等の方式を別ADRで決定する
