@@ -1117,6 +1117,8 @@ Native API、Python SDK、WebSocket/API等は将来比較する。
 
 # 33. 開発フェーズ
 
+実装の順番は ROADMAP.md の「公開とお披露目の計画」に従い、Phase 5・6 のうちボイストリガーに必要な最小限を、Phase 3・4 より先に作る。
+
 ## Phase 0 --- Repository / Skeleton
 
 目的: 公開可能な骨格。

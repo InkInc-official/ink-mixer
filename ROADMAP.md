@@ -10,9 +10,24 @@
 
 このロードマップは [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) の「33. 開発フェーズ」を要約したものです。内容が食い違う場合は ARCHITECTURE.md を正とします。
 
-**現在地: Phase 0**
+**現在地: Phase 0 完了、Phase 1 準備中**
 
-### Phase 0 — Repository / Skeleton（進行中）
+### 公開とお披露目の計画
+
+公開とお披露目は、開発フェーズとは別に次の順で進めます。
+
+1. **リポジトリを静かに公開する** — 宣伝はしません。
+2. **Phase 1・2** — マイク・BGM・効果音を混ぜて出力できるところまで作ります。
+3. **文字起こし（STT）の Spike** — ローカルで動く文字起こしエンジンを試作し、遅延・CPU 使用率・日本語の認識精度と、創作PC（RAM 8GB）でミキサーと同時に動くかを確かめます。エンジンは結果を元に ADR で決めます。
+4. **ボイストリガーまでの最短の道** — Phase 5・6 のうち、ボイストリガーに必要な最小限だけを先に作ります（マイクの分岐、文字起こしの処理、決めた言葉を認識したら効果音を鳴らす、cooldown）。Phase 3・4 と、Phase 5・6 の残り（OBS 字幕、複数のアクションなど）はその後に作ります。
+5. **所属ライバーの先行利用** — Ink Inc. 所属のライバーに実際の配信で使ってもらい、見つかった問題を直します。
+6. **お披露目** — 目玉はボイストリガーです（例：「オーマイガー」と言うと効果音が鳴る）。
+
+先に作る場合も、ボイストリガーは Event → Condition → Action の汎用的な仕組みの1つとして作ります。また、MASTER ではなくマイクを分岐した音声を認識します（ARCHITECTURE.md §11）。
+
+Phase 2 の Public Alpha は配布を始める時期の目安で、宣伝はお披露目まで行いません。
+
+### Phase 0 — Repository / Skeleton（完了）
 
 目的: 公開可能な骨格を作る。
 
@@ -142,9 +157,24 @@ v0.0.x / 最初の Alpha では、以下を完成させようとしない。
 
 This roadmap summarizes section 33 ("Development Phases") of [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (in Japanese). If they disagree, ARCHITECTURE.md is the source of truth.
 
-**Current phase: Phase 0**
+**Current phase: Phase 0 complete, preparing Phase 1**
 
-### Phase 0 — Repository / Skeleton (in progress)
+### Release and Launch Plan
+
+Separately from the development phases, the release and public launch proceed in this order:
+
+1. **Publish the repository quietly** — no promotion.
+2. **Phase 1 and 2** — up to mixing and outputting the microphone, BGM, and sound effects.
+3. **Speech-to-text (STT) spike** — prototype a local speech-to-text engine and check latency, CPU usage, Japanese recognition accuracy, and whether it runs alongside the mixer on the main development PC (8 GB RAM). The engine will be chosen in an ADR based on the results.
+4. **Shortest path to voice triggers** — build only the minimum parts of Phase 5 and 6 needed for voice triggers first (a microphone branch, speech-to-text processing, playing a sound effect when a chosen phrase is recognized, and a cooldown). Phase 3 and 4, and the rest of Phase 5 and 6 (OBS captions, multiple actions, etc.), come after that.
+5. **Early use by Ink Inc.'s affiliated streamers** — they use it in real streams, and the problems they find are fixed.
+6. **Public launch** — the headline feature is voice triggers (e.g., saying "Oh my god" plays a sound effect).
+
+Even when built early, voice triggers are implemented as one use of the general Event → Condition → Action system, and they recognize a branch of the microphone audio, not MASTER (ARCHITECTURE.md §11).
+
+The Phase 2 Public Alpha marks roughly when distribution starts; there will be no promotion until the public launch.
+
+### Phase 0 — Repository / Skeleton (done)
 
 Goal: a publishable skeleton.
 
