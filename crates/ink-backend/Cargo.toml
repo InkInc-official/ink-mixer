@@ -3,6 +3,7 @@ name = "ink-backend"
 description = "Ink Mixer audio backend: audio I/O abstraction and implementations"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]

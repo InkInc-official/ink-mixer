@@ -53,7 +53,7 @@ cargo run -p ink-mixer
 
 ### ライセンス
 
-**未定（TBD）**
+GPL-3.0-or-later。全文は [LICENSE](LICENSE)、理由は [ADR-0005](docs/adr/0005-license.md) を参照。
 
 ---
 
@@ -106,4 +106,4 @@ cargo run -p ink-mixer
 
 ### License
 
-**TBD (not yet decided)**
+GPL-3.0-or-later. See [LICENSE](LICENSE) for the full text and [ADR-0005](docs/adr/0005-license.md) for the rationale (in Japanese).
