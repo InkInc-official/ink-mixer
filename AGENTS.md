@@ -86,10 +86,10 @@ Audio callback / realtime処理パスでは以下を**禁止**する。
 - Core言語はRust（ADR-0001）
 - 最初の音声I/Oライブラリは `cpal`（ADR-0002）
 - crate の依存の向きは `ink-backend` → `ink-core`。`ink-core` は `ink-backend` に依存しない（`cpal` を core に入れないため）。両方で使う型（`DeviceId` 等）は `ink-core` に置く（ADR-0003）
+- GUI フレームワークは egui / eframe、描画の既定は glow（ADR-0004）
 
 ### 未決（決定済みとして扱わないこと）
 
-- GUIフレームワーク
 - リポジトリのライセンス
 - Windowsの仮想出力方式
 - LV2 Hostライブラリの採用範囲
@@ -97,6 +97,7 @@ Audio callback / realtime処理パスでは以下を**禁止**する。
 - プラグインのプロセス分離方式
 - Python SDKの方式
 - VST3 / macOS の対応時期
+- 日本語フォントの扱い（同梱するか、OS のフォントを読むか。Phase 1 の GUI 実装前に決める。ADR-0004 参照）
 
 未決事項に関わる実装が必要になったら、実装せずに所長へ報告し、ADRの起票を提案すること。
 

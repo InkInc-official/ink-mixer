@@ -1408,8 +1408,6 @@ Plugin Failures:
 
 以下は設計上まだ確定させない。
 
--   GUI framework
--   最初のcross-platform audio I/O library
 -   Windows virtual output方式
 -   LV2 Host libraryを利用するか独自実装範囲
 -   Noise Suppression engine
@@ -1422,6 +1420,8 @@ AIエージェントはこれらを「決定済み」と扱わないこと。
 
 決定時にはADR（Architecture Decision Record）を残す。
 
+決定済みの事項は `docs/adr/` と AGENTS.md §6 を参照する（音声I/Oライブラリ: ADR-0002、GUI framework: ADR-0004）。
+
 ------------------------------------------------------------------------
 
 # 40. ADR例
@@ -1430,10 +1430,11 @@ AIエージェントはこれらを「決定済み」と扱わないこと。
 docs/adr/
 ├─ 0001-rust-core.md
 ├─ 0002-audio-backend.md
-├─ 0003-gui-framework.md
-├─ 0004-lv2-host-library.md
-└─ 0005-plugin-isolation.md
+├─ 0003-crate-dependency-direction.md
+└─ 0004-gui-framework.md
 ```
+
+今後の候補（番号は起票時に決める）: LV2 Host library、Plugin process isolation など。
 
 各ADR:
 
