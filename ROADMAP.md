@@ -48,6 +48,7 @@ MIC -> Gain -> MASTER -> Output
 - Loop
 - volume
 - basic UI
+- 配布前に `cargo-about` で依存crateのライセンス表記を作る
 
 **完了条件:** MIC + BGM + SE を同時にミックスして出力できる。
 
@@ -177,6 +178,7 @@ MIC -> Gain -> MASTER -> Output
 - Loop
 - Volume
 - Basic UI
+- Generate third-party license notices with `cargo-about` before distribution
 
 **Done when:** MIC + BGM + SE can be mixed together and output.
 
