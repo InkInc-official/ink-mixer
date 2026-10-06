@@ -58,5 +58,5 @@ Option 1: egui + glow
 - GPU の無い環境（llvmpipe などのソフトウェア描画）は未測定
 - LV2 プラグインの独自 GUI の埋め込み（Phase 9）は未検証
 - 配布するときは、egui に同梱されている欧文フォント（OFL-1.1 と Ubuntu Font License）の表記が必要（ROADMAP Phase 2 の cargo-about）
-- 日本語フォントを同梱するか、OS のフォントを読むかは未決。Phase 1 の GUI 実装を始める前に決める
+- 日本語フォントを同梱するか、OS のフォントを読むかは未決。Phase 1 の GUI 実装を始める前に決める → ADR-0006 で決定（Noto Sans JP を同梱）
 - GUI は Engine の実装詳細に依存しない（AGENTS.md §4 の5）
