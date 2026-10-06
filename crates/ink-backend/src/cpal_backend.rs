@@ -68,23 +68,45 @@ impl CpalBackend {
             .id()
             .map_err(|e| BackendError::DeviceUnavailable(e.to_string()))?
             .to_string();
-        let Some(info) = device_info(&device, id, direction)? else {
+        let Some(mut info) = device_info(&device, id, direction)? else {
             return Ok(None);
         };
         // cpal may name the default device differently from the same device
-        // in the list. If the list cannot be read, keep the default's name.
-        let listed = self.enumerate(direction).unwrap_or_default();
-        Ok(Some(use_listed_name(info, &listed)))
+        // in the list. If no listed device has this ID, keep the default's name.
+        if let Some(name) = self.listed_name(info.id.as_str(), direction) {
+            info.name = name;
+        }
+        Ok(Some(info))
+    }
+
+    /// Returns the name that the device list shows for `id`.
+    ///
+    /// Reads only IDs and names; it does not open devices or query their
+    /// configurations.
+    fn listed_name(&self, id: &str, direction: Direction) -> Option<String> {
+        let devices = self.host.devices().ok()?;
+        let candidates = devices.filter_map(|device| {
+            let device_id = device.id().ok()?.to_string();
+            if device_id != id || !direction.supported_by(&device) {
+                return None;
+            }
+            let name = device.description().ok()?.name().to_string();
+            Some((device_id, name))
+        });
+        pick_listed_name(id, candidates)
     }
 }
 
-/// Uses the name of the device with the same ID in `listed`, if any, so that
-/// one device is shown under one name.
-fn use_listed_name(mut info: DeviceInfo, listed: &[DeviceInfo]) -> DeviceInfo {
-    if let Some(same) = listed.iter().find(|d| d.id == info.id) {
-        info.name.clone_from(&same.name);
-    }
-    info
+/// Picks the name of the listed device whose ID is `id` from
+/// `(device ID, name)` pairs.
+fn pick_listed_name(
+    id: &str,
+    candidates: impl IntoIterator<Item = (String, String)>,
+) -> Option<String> {
+    candidates
+        .into_iter()
+        .find(|(device_id, _)| device_id == id && is_listed(device_id))
+        .map(|(_, name)| name)
 }
 
 impl Default for CpalBackend {
@@ -287,31 +309,33 @@ mod tests {
         }
     }
 
-    fn info(id: &str, name: &str) -> DeviceInfo {
-        DeviceInfo {
-            id: DeviceId::new(id),
-            name: name.to_string(),
-            channels: 2,
-            sample_rates: vec![48_000],
-        }
+    fn candidates(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect()
     }
 
     #[test]
     fn default_takes_the_name_from_the_list() {
-        let listed = [
-            info("alsa:pulse", "PulseAudio Sound Server"),
-            info("alsa:default", "Through the sound server"),
-        ];
-        let default = use_listed_name(info("alsa:default", "Default Audio Device"), &listed);
-        assert_eq!(default, info("alsa:default", "Through the sound server"));
+        let found = pick_listed_name(
+            "alsa:default",
+            candidates(&[
+                ("alsa:pulse", "PulseAudio Sound Server"),
+                ("alsa:default", "Through the sound server"),
+            ]),
+        );
+        assert_eq!(found.as_deref(), Some("Through the sound server"));
     }
 
     #[test]
     fn default_keeps_its_name_when_not_listed() {
-        let listed = [info("alsa:pulse", "PulseAudio Sound Server")];
-        let default = use_listed_name(info("alsa:default", "Default Audio Device"), &listed);
-        assert_eq!(default.name, "Default Audio Device");
-        assert_eq!(use_listed_name(default.clone(), &[]), default);
+        let others = candidates(&[("alsa:pulse", "PulseAudio Sound Server")]);
+        assert_eq!(pick_listed_name("alsa:default", others), None);
+        assert_eq!(pick_listed_name("alsa:default", Vec::new()), None);
+        // A device that the list leaves out does not lend its name either.
+        let hidden = candidates(&[("alsa:hw:CARD=PCH,DEV=3", "HDA Intel PCH")]);
+        assert_eq!(pick_listed_name("alsa:hw:CARD=PCH,DEV=3", hidden), None);
     }
 
     #[test]
