@@ -23,8 +23,10 @@ mod backend;
 mod cpal_backend;
 mod device;
 mod error;
+mod stream;
 
 pub use backend::AudioBackend;
 pub use cpal_backend::CpalBackend;
 pub use device::{DeviceId, DeviceInfo};
 pub use error::{BackendError, Result};
+pub use stream::{InputCallback, InputStream, MAX_FRAMES_PER_CALLBACK, StreamConfig, StreamError};

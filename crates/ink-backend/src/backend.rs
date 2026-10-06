@@ -1,6 +1,6 @@
 //! The audio backend abstraction.
 
-use crate::{DeviceInfo, Result};
+use crate::{DeviceId, DeviceInfo, InputCallback, InputStream, Result, StreamConfig};
 
 /// Backend-independent access to the audio devices of the system.
 ///
@@ -35,15 +35,43 @@ pub trait AudioBackend {
     /// Returns `Ok(None)` when there is no default output device; this is a
     /// normal state, not an error.
     fn default_output(&self) -> Result<Option<DeviceInfo>>;
+
+    /// Opens and starts capturing from the input device `device` with
+    /// `config`.
+    ///
+    /// `callback` receives the captured audio on the audio thread (see
+    /// [`InputCallback`]). The stream runs until the returned
+    /// [`InputStream`] is dropped.
+    ///
+    /// # Errors
+    ///
+    /// - [`BackendError::DeviceUnavailable`](crate::BackendError::DeviceUnavailable)
+    ///   if the device is not found or cannot be opened.
+    /// - [`BackendError::UnsupportedConfig`](crate::BackendError::UnsupportedConfig)
+    ///   if the device does not support the sample rate and channel count.
+    fn open_input(
+        &self,
+        device: &DeviceId,
+        config: StreamConfig,
+        callback: InputCallback,
+    ) -> Result<InputStream>;
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{BackendError, DeviceId};
+    use std::sync::{Arc, Mutex};
 
-    /// A backend with one fixed output device and no input devices.
+    use super::*;
+    use crate::BackendError;
+    use crate::stream::StreamStatus;
+
+    /// A backend with one fixed output device and no listed input devices.
+    ///
+    /// `open_input` accepts only [`FAKE_MIC`] and calls the callback once,
+    /// synchronously, with one frame per channel.
     struct FakeBackend;
+
+    const FAKE_MIC: &str = "fake:mic";
 
     fn speaker() -> DeviceInfo {
         DeviceInfo {
@@ -70,6 +98,22 @@ mod tests {
         fn default_output(&self) -> Result<Option<DeviceInfo>> {
             Ok(Some(speaker()))
         }
+
+        fn open_input(
+            &self,
+            device: &DeviceId,
+            config: StreamConfig,
+            mut callback: InputCallback,
+        ) -> Result<InputStream> {
+            if device.as_str() != FAKE_MIC {
+                return Err(BackendError::DeviceUnavailable(device.to_string()));
+            }
+            let status = Arc::new(StreamStatus::new());
+            let frame = vec![0.25; usize::from(config.channels)];
+            status.record_callback(1);
+            callback(&frame);
+            Ok(InputStream::new(Box::new(()), status, config, "f32"))
+        }
     }
 
     #[test]
@@ -84,6 +128,40 @@ mod tests {
         let backend = FakeBackend;
         assert_eq!(backend.default_input().unwrap(), None);
         assert_eq!(backend.default_output().unwrap(), Some(speaker()));
+    }
+
+    #[test]
+    fn open_input_through_trait_object() {
+        let backend: Box<dyn AudioBackend> = Box::new(FakeBackend);
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&received);
+        let config = StreamConfig {
+            sample_rate: 48_000,
+            channels: 2,
+        };
+
+        let stream = backend
+            .open_input(
+                &DeviceId::new(FAKE_MIC),
+                config,
+                Box::new(move |samples: &[f32]| sink.lock().unwrap().extend_from_slice(samples)),
+            )
+            .unwrap();
+
+        assert_eq!(stream.config(), config);
+        assert_eq!(stream.callbacks(), 1);
+        assert_eq!(stream.error(), None);
+        assert_eq!(*received.lock().unwrap(), vec![0.25, 0.25]);
+    }
+
+    #[test]
+    fn open_input_unknown_device_is_unavailable() {
+        let config = StreamConfig {
+            sample_rate: 48_000,
+            channels: 1,
+        };
+        let result = FakeBackend.open_input(&DeviceId::new("fake:none"), config, Box::new(|_| {}));
+        assert!(matches!(result, Err(BackendError::DeviceUnavailable(_))));
     }
 
     #[test]
