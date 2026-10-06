@@ -5,15 +5,27 @@
 //! blocks; buffers are allocated before the stream starts, never on the
 //! realtime path.
 //!
+//! Values cross between the UI and the audio thread only through atomics:
+//! gains and mute through [`MixerControl`], levels through [`PeakMeter`]
+//! (ADR-0007).
+//!
 //! This module does no I/O. Sources and sinks that talk to audio devices are
 //! added with the first stream implementation.
 
 mod buffer;
+mod control;
 mod gain;
+mod level;
+mod meter;
 mod mixer;
 
 pub use buffer::AudioBuffer;
+pub use control::{ChannelControl, MixerControl};
 pub use gain::GainNode;
+pub use level::{
+    DbRange, MASTER_VOLUME_RANGE, MIC_GAIN_RANGE, SILENCE_DB, block_peak, db_to_gain, gain_to_db,
+};
+pub use meter::PeakMeter;
 pub use mixer::MixerNode;
 
 /// A processing step that transforms one buffer in place.
