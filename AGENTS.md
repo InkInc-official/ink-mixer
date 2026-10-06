@@ -84,6 +84,7 @@ Audio callback / realtime処理パスでは以下を**禁止**する。
 
 - Core言語はRust（ADR-0001）
 - 最初の音声I/Oライブラリは `cpal`（ADR-0002）
+- crate の依存の向きは `ink-backend` → `ink-core`。`ink-core` は `ink-backend` に依存しない（`cpal` を core に入れないため）。両方で使う型（`DeviceId` 等）は `ink-core` に置く（ADR-0003）
 
 ### 未決（決定済みとして扱わないこと）
 
