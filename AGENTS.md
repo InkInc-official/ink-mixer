@@ -90,6 +90,7 @@ Audio callback / realtime処理パスでは以下を**禁止**する。
 - GUI フレームワークは egui / eframe、描画の既定は glow（ADR-0004）
 - リポジトリのライセンスは GPL-3.0-or-later（ADR-0005）。依存を追加するときは GPL-3.0 と組み合わせられるかを確認する
 - 日本語フォントは Noto Sans JP を同梱する（ADR-0006）。組み込みは Phase 1 の GUI 実装で行う
+- Audio Graph の最小の形（Phase 1 はつなぎ方を固定）と、音声スレッド・UI 間の値の受け渡し（出力側で Graph を回す、リングバッファは `rtrb`、パラメータとメーターは atomic）（ADR-0007）
 
 ### 未決（決定済みとして扱わないこと）
 
@@ -136,6 +137,7 @@ Linuxでのビルドには `libasound2-dev` と `pkg-config` が必要（cpalの
 - PR本文には「対応Issue」「変更内容」「Windows/Linuxへの影響」「確認した方法」を書く。
 - ブランチ名: `type/<GitHub Issue番号>-<短い説明>`（例: `feat/5-logging`）。番号は GitHub の Issue 番号を使う。
 - PR本文の対応Issueは `Closes #<GitHub Issue番号>` と書く。
+- PR を作ったら、手元は `main` に戻して最新にする（`git switch main`、`git pull --ff-only`）。
 - `docs/PHASE0_ISSUES.md` の見出しの番号（Phase 0 番号）と GitHub の Issue 番号は異なる。
   GitHub 上で Phase 0 の項目を参照するときは、裸の `#N` ではなく「Phase 0 #N（#GitHub番号）」と書く（`#N` は GitHub が別の Issue に自動リンクしてしまうため）。
 - Windows 実機での確認は、Phase ごとに GitHub Issue「Windows 実機確認（Phase N）」を1つ作り、確認項目をチェックボックスで追記してまとめる。
