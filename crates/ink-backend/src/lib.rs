@@ -18,3 +18,11 @@
 //! buffers), and that thread does the logging.
 //!
 //! See `AGENTS.md` §5 and `docs/ARCHITECTURE.md` §25.
+
+mod backend;
+mod device;
+mod error;
+
+pub use backend::AudioBackend;
+pub use device::{DeviceId, DeviceInfo};
+pub use error::{BackendError, Result};
