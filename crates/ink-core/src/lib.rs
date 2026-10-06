@@ -5,6 +5,8 @@
 //!
 //! This crate must not depend on OS-specific audio APIs or on `cpal`.
 
+pub mod graph;
+
 mod config;
 mod device_id;
 
