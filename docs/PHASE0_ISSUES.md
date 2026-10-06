@@ -5,9 +5,11 @@ Phase 0の目的: **公開可能な骨格を作る。**
 
 GUIフレームワークは未決のため、Phase 0はCLIで動作確認する。
 
+見出しの #N は Phase 0 の番号。括弧内は対応する GitHub の Issue / PR 番号。
+
 ---
 
-## #1 Rust workspaceを作成する
+## #1 Rust workspaceを作成する（GitHub: PR #1、Issue なし）
 
 **内容**
 - ルートに `Cargo.toml`（workspace）を作成
@@ -24,7 +26,7 @@ GUIフレームワークは未決のため、Phase 0はCLIで動作確認する�
 
 ---
 
-## #2 ドキュメントを配置する
+## #2 ドキュメントを配置する（GitHub: PR #2、Issue なし）
 
 **内容**
 - Blueprintを `docs/ARCHITECTURE.md` として配置
@@ -38,7 +40,7 @@ GUIフレームワークは未決のため、Phase 0はCLIで動作確認する�
 
 ---
 
-## #3 ロギング基盤を入れる
+## #3 ロギング基盤を入れる（GitHub #5）
 
 **内容**
 - `tracing` + `tracing-subscriber` を導入
@@ -50,7 +52,7 @@ GUIフレームワークは未決のため、Phase 0はCLIで動作確認する�
 
 ---
 
-## #4 ADR-0002: 音声I/Oライブラリ
+## #4 ADR-0002: 音声I/Oライブラリ（GitHub #6）
 
 **内容**
 - `docs/adr/0002-audio-backend.md` を作成
@@ -62,7 +64,7 @@ GUIフレームワークは未決のため、Phase 0はCLIで動作確認する�
 
 ---
 
-## #5 AudioBackend traitを定義する
+## #5 AudioBackend traitを定義する（GitHub #7）
 
 **内容**
 - `ink-backend` に `AudioBackend` traitを定義
@@ -78,7 +80,7 @@ GUIフレームワークは未決のため、Phase 0はCLIで動作確認する�
 
 ---
 
-## #6 cpalでデバイス列挙を実装する
+## #6 cpalでデバイス列挙を実装する（GitHub #8）
 
 **内容**
 - `CpalBackend` を実装し、#5のtraitを満たす
@@ -89,7 +91,7 @@ GUIフレームワークは未決のため、Phase 0はCLIで動作確認する�
 
 ---
 
-## #7 Config skeletonを作る
+## #7 Config skeletonを作る（GitHub #9）
 
 **内容**
 - `ink-core` に設定の型を定義（`version` フィールド必須）
@@ -103,7 +105,7 @@ GUIフレームワークは未決のため、Phase 0はCLIで動作確認する�
 
 ---
 
-## #8 CLIでデバイス一覧を表示する
+## #8 CLIでデバイス一覧を表示する（GitHub #10）
 
 **内容**
 - `ink-mixer devices` で入出力デバイスとデフォルトデバイスを表示
@@ -114,7 +116,7 @@ GUIフレームワークは未決のため、Phase 0はCLIで動作確認する�
 
 ---
 
-## #9 CIを作る
+## #9 CIを作る（GitHub #11）
 
 **内容**
 - GitHub Actions: `ubuntu-latest` と `windows-latest`
