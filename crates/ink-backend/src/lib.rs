@@ -20,9 +20,11 @@
 //! See `AGENTS.md` §5 and `docs/ARCHITECTURE.md` §25.
 
 mod backend;
+mod cpal_backend;
 mod device;
 mod error;
 
 pub use backend::AudioBackend;
+pub use cpal_backend::CpalBackend;
 pub use device::{DeviceId, DeviceInfo};
 pub use error::{BackendError, Result};
