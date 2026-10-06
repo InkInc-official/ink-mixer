@@ -1424,7 +1424,7 @@ AIエージェントはこれらを「決定済み」と扱わないこと。
 
 決定時にはADR（Architecture Decision Record）を残す。
 
-決定済みの事項は `docs/adr/` と AGENTS.md §6 を参照する（音声I/Oライブラリ: ADR-0002、GUI framework: ADR-0004）。
+決定済みの事項は `docs/adr/` と AGENTS.md §6 を参照する（音声I/Oライブラリ: ADR-0002、GUI framework: ADR-0004、Audio Graph と値の受け渡し: ADR-0007）。
 
 ------------------------------------------------------------------------
 
@@ -1437,7 +1437,8 @@ docs/adr/
 ├─ 0003-crate-dependency-direction.md
 ├─ 0004-gui-framework.md
 ├─ 0005-license.md
-└─ 0006-japanese-font.md
+├─ 0006-japanese-font.md
+└─ 0007-audio-graph-and-realtime-communication.md
 ```
 
 今後の候補（番号は起票時に決める）: LV2 Host library、Plugin process isolation など。
