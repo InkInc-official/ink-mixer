@@ -6,7 +6,7 @@
 use std::collections::BTreeSet;
 
 use cpal::traits::{DeviceTrait, HostTrait};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::{AudioBackend, BackendError, DeviceId, DeviceInfo, Result};
 
@@ -35,7 +35,7 @@ impl CpalBackend {
             let id = match device.id() {
                 Ok(id) => id.to_string(),
                 Err(e) => {
-                    warn!("skipping audio device without an ID: {e}");
+                    debug!("skipping audio device without an ID: {e}");
                     continue;
                 }
             };
@@ -50,7 +50,7 @@ impl CpalBackend {
                 Ok(Some(info)) => infos.push(info),
                 // No configuration in this direction: not a device of this kind.
                 Ok(None) => {}
-                Err(e) => warn!("skipping audio device: {e}"),
+                Err(e) => debug!("skipping audio device: {e}"),
             }
         }
         Ok(infos)
