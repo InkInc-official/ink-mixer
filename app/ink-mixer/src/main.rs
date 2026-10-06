@@ -1,12 +1,23 @@
+mod cli;
+mod devices;
+
 use std::io::IsTerminal;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
+use clap::Parser;
 use directories::ProjectDirs;
+use ink_backend::CpalBackend;
 use ink_core::Config;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-fn main() {
+use crate::cli::{Cli, Command};
+
+fn main() -> ExitCode {
+    // --help / --version はここで表示して終了する（ログより先）
+    let cli = Cli::parse();
+
     // RUST_LOG が未設定（または不正）なら info を既定にする
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     // ログは stderr に出し、stdout はコマンドの出力（devices 一覧など）専用にする
@@ -23,7 +34,12 @@ fn main() {
         std::env::consts::OS
     );
 
-    let _config = load_config();
+    let config = load_config();
+
+    match cli.command {
+        Some(Command::Devices) => devices::run(&CpalBackend::new(), &config),
+        None => ExitCode::SUCCESS,
+    }
 }
 
 /// 設定ファイルの場所（OS 標準の設定ディレクトリ配下の `config.toml`）
