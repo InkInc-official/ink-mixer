@@ -1,0 +1,13 @@
+# Spike (GitHub #21): egui GUI prototype for measurement.
+# Not part of the main workspace and never merged into main.
+[package]
+name = "egui-mixer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Own empty workspace so this crate stays out of the root workspace.
+[workspace]
+
+[dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
