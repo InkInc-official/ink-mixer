@@ -21,13 +21,17 @@
 
 ## 実行してはいけないコマンド
 
-- `git push`、`gh auth`、トークンやAPIキーの設定
+- `main` への直接 `git push`、`git push --force` / `--force-with-lease`
+- `gh auth`、トークンやAPIキーの設定
+- PRのマージ（`gh pr merge` 等）
 - `cargo publish`
 - `rm -rf` 等、リポジトリ外へ影響する削除
 - システムの音声設定（PipeWire / ALSA の設定ファイル等）の変更
+
+作業ブランチへの `git push` と `gh pr create` は行ってよい。
 
 ## 完了時
 
 - `cargo build` / `cargo test` / `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` の結果を報告する。
 - 実機で確認すべき項目（デバイス、OS）があれば一覧にして所長へ渡す。
-- コミットまでは行い、pushは所長が行う。
+- コミット後、作業ブランチへ push し、`gh pr create` でPRを作成する。マージは所長が行う。
