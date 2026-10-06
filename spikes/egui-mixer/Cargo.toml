@@ -11,3 +11,7 @@ publish = false
 
 [dependencies]
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
+
+[features]
+# Enable only to try the wgpu renderer (the default build is glow only).
+wgpu = ["eframe/wgpu"]
