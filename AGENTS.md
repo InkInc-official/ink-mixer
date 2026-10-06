@@ -130,3 +130,19 @@ Linuxでのビルドには `libasound2-dev` と `pkg-config` が必要（cpalの
 - コミットメッセージ: `type(scope): 要約`（例: `feat(backend): enumerate output devices`）
 - type: `feat` / `fix` / `refactor` / `docs` / `test` / `chore` / `ci`
 - PR本文には「対応Issue」「変更内容」「Windows/Linuxへの影響」「確認した方法」を書く。
+- ブランチ名: `type/<GitHub Issue番号>-<短い説明>`（例: `feat/5-logging`）。番号は GitHub の Issue 番号を使う。
+- PR本文の対応Issueは `Closes #<GitHub Issue番号>` と書く。
+- `docs/PHASE0_ISSUES.md` の見出しの番号（Phase 0 番号）と GitHub の Issue 番号は異なる。
+  GitHub 上で Phase 0 の項目を参照するときは、裸の `#N` ではなく「Phase 0 #N（#GitHub番号）」と書く（`#N` は GitHub が別の Issue に自動リンクしてしまうため）。
+- Windows 実機での確認は、Phase ごとに GitHub Issue「Windows 実機確認（Phase N）」を1つ作り、確認項目をチェックボックスで追記してまとめる。
+  PR では、追記した先の Issue を「Windows/Linuxへの影響」に書く。
+
+---
+
+## 10. ログ出力
+
+- ログは `tracing` で出し、出力先は **stderr** にする。
+- **stdout はコマンドの出力（デバイス一覧など）専用**とし、ログを混ぜない。
+- ログの色付け（ANSIエスケープ）は、stderr が端末のときだけ行う。ファイルや pipe に出すときは色を付けない。
+- `RUST_LOG` でレベルを変更できるようにし、未設定のときは `info` を既定にする。
+- Realtimeパスではログを出さない（§5）。
