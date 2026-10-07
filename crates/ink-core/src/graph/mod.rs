@@ -9,14 +9,21 @@
 //! gains and mute through [`MixerControl`], levels through [`PeakMeter`]
 //! (ADR-0007).
 //!
-//! This module does no I/O. Sources and sinks that talk to audio devices are
-//! added with the first stream implementation.
+//! This module does no I/O. The streams live in `ink-backend`: the input
+//! callback writes the MIC into a [`LinkWriter`], and the output callback
+//! runs a [`MicGraph`], which reads it through a [`MicrophoneSource`].
+//!
+//! There is no `AudioSink` trait yet: the only destination is the output
+//! device buffer, written by [`write_interleaved`]. Add `AudioSink` when a
+//! second destination (a monitor, a recorder, ...) arrives.
 
 mod buffer;
 mod control;
 mod gain;
 mod level;
+mod link;
 mod meter;
+mod mic_graph;
 mod mixer;
 
 pub use buffer::AudioBuffer;
@@ -25,7 +32,12 @@ pub use gain::GainNode;
 pub use level::{
     DbRange, MASTER_VOLUME_RANGE, MIC_GAIN_RANGE, SILENCE_DB, block_peak, db_to_gain, gain_to_db,
 };
+pub use link::{
+    LinkReader, LinkStats, LinkWriter, MIN_CAPACITY, MIN_TARGET, MicrophoneSource, audio_link,
+    capacity_frames, target_frames,
+};
 pub use meter::PeakMeter;
+pub use mic_graph::{MicGraph, write_interleaved};
 pub use mixer::MixerNode;
 
 /// A processing step that transforms one buffer in place.
@@ -43,4 +55,22 @@ pub trait AudioNode: Send {
     /// Called on the realtime path: implementations must not allocate,
     /// block, or log.
     fn process(&mut self, buffer: &mut AudioBuffer);
+}
+
+/// Produces audio into a buffer: the start of a path through the graph.
+///
+/// Implementations are moved to the audio thread, so they must be `Send`.
+pub trait AudioSource: Send {
+    /// Prepares for producing audio at `sample_rate`.
+    ///
+    /// Called outside the realtime path, for example when a stream is
+    /// opened.
+    fn prepare(&mut self, sample_rate: u32);
+
+    /// Fills the frames in use of `out`. Whatever is not available is
+    /// silent.
+    ///
+    /// Called on the realtime path: implementations must not allocate,
+    /// block, or log.
+    fn render(&mut self, out: &mut AudioBuffer);
 }
