@@ -1,0 +1,436 @@
+//! An audio session: the input and output streams that play
+//! MIC -> Gain -> MASTER -> output (ADR-0007). Used by `ink-mixer run` and
+//! by the window.
+//!
+//! The output is opened first, then the input, and the two are connected
+//! with a ring buffer (`audio_link`). The output callback runs a `MicGraph`.
+//! The sample rate and channel counts are chosen by actually opening the
+//! devices, because the numbers in `DeviceInfo` cannot be trusted (ALSA
+//! `sysdefault` reports that it supports everything).
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use ink_backend::{
+    AudioBackend, BackendError, DeviceId, DeviceInfo, InputStream, MAX_FRAMES_PER_CALLBACK,
+    OutputStream, StreamConfig, StreamError,
+};
+use ink_core::Config;
+use ink_core::graph::{LinkStats, MicGraph, MicrophoneSource, MixerControl, audio_link};
+use tracing::{debug, warn};
+
+/// A stream without a callback for this long is considered stopped.
+const STALL: Duration = Duration::from_secs(1);
+/// Sample rates tried first (ADR-0007), if both devices report them.
+const PREFERRED_RATES: [u32; 3] = [48_000, 44_100, 96_000];
+/// The input channel used as the MIC (the first one, ADR-0007).
+const MIC_CHANNEL: usize = 0;
+
+/// Open input and output streams playing the MIC through the mixer.
+///
+/// Dropping it stops both streams. The fields drop in order, so the input
+/// stops first and nothing writes to the ring buffer while the output stops.
+pub struct AudioSession {
+    input: InputStream,
+    output: OutputStream,
+    stats: Arc<LinkStats>,
+    input_device: DeviceInfo,
+    output_device: DeviceInfo,
+    watch_input: Watch,
+    watch_output: Watch,
+}
+
+impl AudioSession {
+    /// Opens `input` and `output`, trying the candidate configurations in
+    /// order, and starts playing through a graph that follows `control`.
+    pub fn start(
+        backend: &dyn AudioBackend,
+        input: DeviceInfo,
+        output: DeviceInfo,
+        control: &Arc<MixerControl>,
+    ) -> Result<Self, String> {
+        let rates = rate_candidates(&input.sample_rates, &output.sample_rates);
+        if rates.is_empty() {
+            return Err(format!(
+                "{} and {} have no sample rate in common",
+                input.id, output.id
+            ));
+        }
+        let in_channels = channel_candidates(&[1, 2], input.channels);
+        let out_channels = channel_candidates(&[2, 1], output.channels);
+
+        let mut last_error = None;
+        for &rate in &rates {
+            'output: for &out_ch in &out_channels {
+                for &in_ch in &in_channels {
+                    debug!("trying {rate} Hz, input {in_ch} ch, output {out_ch} ch");
+                    match try_open(backend, &input, &output, control, rate, in_ch, out_ch) {
+                        Ok((input_stream, output_stream, stats)) => {
+                            let now = Instant::now();
+                            return Ok(Self {
+                                input: input_stream,
+                                output: output_stream,
+                                stats,
+                                input_device: input,
+                                output_device: output,
+                                watch_input: Watch::new(now),
+                                watch_output: Watch::new(now),
+                            });
+                        }
+                        Err((side, OpenError::Unsupported(e))) => {
+                            debug!("{side} not supported: {e}");
+                            last_error = Some(e);
+                            if side == "output" {
+                                continue 'output;
+                            }
+                        }
+                        Err((side, OpenError::Failed(e))) => {
+                            return Err(format!("failed to open the {side}: {e}"));
+                        }
+                    }
+                }
+            }
+        }
+        Err(match last_error {
+            Some(e) => format!("no working configuration found (last error: {e})"),
+            None => "no working configuration found".to_string(),
+        })
+    }
+
+    /// Checks both streams at `now`: an error, or no callback for a second
+    /// (some systems report nothing when a device is unplugged).
+    pub fn check(&mut self, now: Instant) -> Result<(), String> {
+        self.watch_input
+            .check("input", self.input.error(), self.input.callbacks(), now)?;
+        self.watch_output
+            .check("output", self.output.error(), self.output.callbacks(), now)
+    }
+
+    /// Returns the input stream.
+    pub fn input(&self) -> &InputStream {
+        &self.input
+    }
+
+    /// Returns the output stream.
+    pub fn output(&self) -> &OutputStream {
+        &self.output
+    }
+
+    /// Returns the statistics of the ring buffer between the streams.
+    pub fn stats(&self) -> &LinkStats {
+        &self.stats
+    }
+
+    /// Returns the input device.
+    pub fn input_device(&self) -> &DeviceInfo {
+        &self.input_device
+    }
+
+    /// Returns the output device.
+    pub fn output_device(&self) -> &DeviceInfo {
+        &self.output_device
+    }
+
+    /// Returns the sample rate both streams run at.
+    pub fn sample_rate(&self) -> u32 {
+        self.output.config().sample_rate
+    }
+}
+
+/// Chooses the input and output devices: the requested IDs, then the
+/// configuration, then the defaults (see [`resolve_device`]).
+pub fn choose_devices(
+    backend: &dyn AudioBackend,
+    config: &Config,
+    input: Option<&str>,
+    output: Option<&str>,
+) -> Result<(DeviceInfo, DeviceInfo), String> {
+    let input = resolve_device(
+        "input",
+        input,
+        config.audio.input_device.as_ref(),
+        backend.enumerate_input_devices(),
+        || backend.default_input(),
+    )?;
+    let output = resolve_device(
+        "output",
+        output,
+        config.audio.output_device.as_ref(),
+        backend.enumerate_output_devices(),
+        || backend.default_output(),
+    )?;
+    Ok((input, output))
+}
+
+/// Chooses the device: the argument, then the configuration, then the
+/// default.
+///
+/// A requested ID that is not listed is an error. A configured ID that is
+/// not listed gives a warning, and the default is used.
+fn resolve_device(
+    direction: &str,
+    requested: Option<&str>,
+    configured: Option<&DeviceId>,
+    list: ink_backend::Result<Vec<DeviceInfo>>,
+    default: impl FnOnce() -> ink_backend::Result<Option<DeviceInfo>>,
+) -> Result<DeviceInfo, String> {
+    let list = list.map_err(|e| format!("failed to list {direction} devices: {e}"))?;
+    if let Some(id) = requested {
+        return list
+            .into_iter()
+            .find(|d| d.id.as_str() == id)
+            .ok_or(format!(
+                "{direction} device not found: {id} (see `ink-mixer devices`)"
+            ));
+    }
+    if let Some(id) = configured {
+        match list.into_iter().find(|d| d.id == *id) {
+            Some(device) => return Ok(device),
+            None => warn!("configured {direction} device not found: {id}; using the default"),
+        }
+    }
+    default()
+        .map_err(|e| format!("failed to get the default {direction} device: {e}"))?
+        .ok_or(format!("no default {direction} device"))
+}
+
+/// Why one configuration could not be opened.
+enum OpenError {
+    /// The configuration is not supported; try the next candidate.
+    Unsupported(BackendError),
+    /// Anything else; other candidates would fail too, so give up.
+    Failed(BackendError),
+}
+
+impl From<BackendError> for OpenError {
+    fn from(e: BackendError) -> Self {
+        match e {
+            BackendError::UnsupportedConfig(_) => Self::Unsupported(e),
+            _ => Self::Failed(e),
+        }
+    }
+}
+
+/// Opens one configuration: the output first, then the input, so that the
+/// input does not run alone and overflow the ring buffer. On failure, returns
+/// which side could not be opened.
+fn try_open(
+    backend: &dyn AudioBackend,
+    input: &DeviceInfo,
+    output: &DeviceInfo,
+    control: &Arc<MixerControl>,
+    rate: u32,
+    in_channels: u16,
+    out_channels: u16,
+) -> Result<(InputStream, OutputStream, Arc<LinkStats>), (&'static str, OpenError)> {
+    let (mut writer, reader, stats) = audio_link(rate, MAX_FRAMES_PER_CALLBACK);
+    let mut graph = MicGraph::new(
+        MicrophoneSource::new(reader),
+        Arc::clone(control),
+        rate,
+        MAX_FRAMES_PER_CALLBACK,
+    );
+
+    let out_config = StreamConfig {
+        sample_rate: rate,
+        channels: out_channels,
+    };
+    let out_ch = usize::from(out_channels);
+    let output_stream = backend
+        .open_output(
+            &output.id,
+            out_config,
+            // Audio thread: only runs the graph.
+            Box::new(move |out: &mut [f32]| graph.render(out, out_ch)),
+        )
+        .map_err(|e| ("output", e.into()))?;
+
+    let in_config = StreamConfig {
+        sample_rate: rate,
+        channels: in_channels,
+    };
+    let in_ch = usize::from(in_channels);
+    let input_stream = backend
+        .open_input(
+            &input.id,
+            in_config,
+            // Audio thread: only writes the first channel to the ring buffer.
+            Box::new(move |samples: &[f32]| writer.push_channel(samples, in_ch, MIC_CHANNEL)),
+        )
+        .map_err(|e| ("input", e.into()))?;
+
+    Ok((input_stream, output_stream, stats))
+}
+
+/// Returns the sample rates to try: of the rates both devices report, 48000,
+/// 44100, and 96000 first, then the rest in ascending order. Empty if there
+/// is no common rate.
+fn rate_candidates(input: &[u32], output: &[u32]) -> Vec<u32> {
+    let common: Vec<u32> = input
+        .iter()
+        .copied()
+        .filter(|r| output.contains(r))
+        .collect();
+    let mut rates: Vec<u32> = PREFERRED_RATES
+        .into_iter()
+        .filter(|r| common.contains(r))
+        .collect();
+    let mut rest: Vec<u32> = common
+        .into_iter()
+        .filter(|r| !PREFERRED_RATES.contains(r))
+        .collect();
+    rest.sort_unstable();
+    rest.dedup();
+    rates.extend(rest);
+    rates
+}
+
+/// Returns the channel counts to try: `preferred` first, then the device
+/// maximum, without duplicates and never above the maximum.
+fn channel_candidates(preferred: &[u16], max: u16) -> Vec<u16> {
+    let mut channels = Vec::new();
+    for &ch in preferred.iter().chain(std::iter::once(&max)) {
+        if ch >= 1 && ch <= max.max(1) && !channels.contains(&ch) {
+            channels.push(ch);
+        }
+    }
+    channels
+}
+
+/// Watches one stream: its error and whether its callbacks keep coming.
+#[derive(Debug)]
+struct Watch {
+    callbacks: u64,
+    progress: Instant,
+}
+
+impl Watch {
+    fn new(now: Instant) -> Self {
+        Self {
+            callbacks: 0,
+            progress: now,
+        }
+    }
+
+    fn check(
+        &mut self,
+        side: &str,
+        error: Option<StreamError>,
+        callbacks: u64,
+        now: Instant,
+    ) -> Result<(), String> {
+        if let Some(e) = error {
+            return Err(format!("{side} stream stopped: {e}"));
+        }
+        if callbacks != self.callbacks {
+            self.callbacks = callbacks;
+            self.progress = now;
+        } else if now.saturating_duration_since(self.progress) >= STALL {
+            return Err(format!(
+                "{side} stopped: no callback for {} s (device unplugged?)",
+                STALL.as_secs()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rates_prefer_48k_then_44_1k_then_96k() {
+        let all = [8_000, 44_100, 48_000, 96_000, 192_000];
+        assert_eq!(
+            rate_candidates(&all, &all),
+            vec![48_000, 44_100, 96_000, 8_000, 192_000]
+        );
+    }
+
+    #[test]
+    fn rates_must_be_common_to_both_devices() {
+        assert_eq!(
+            rate_candidates(&[44_100, 48_000], &[44_100, 96_000]),
+            vec![44_100]
+        );
+        assert_eq!(
+            rate_candidates(&[32_000, 22_050], &[22_050, 32_000]),
+            vec![22_050, 32_000]
+        );
+        assert_eq!(rate_candidates(&[48_000], &[44_100]), Vec::<u32>::new());
+        assert_eq!(rate_candidates(&[], &[48_000]), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn input_channels_try_mono_first() {
+        assert_eq!(channel_candidates(&[1, 2], 64), vec![1, 2, 64]);
+        assert_eq!(channel_candidates(&[1, 2], 2), vec![1, 2]);
+        assert_eq!(channel_candidates(&[1, 2], 1), vec![1]);
+    }
+
+    #[test]
+    fn output_channels_try_stereo_first() {
+        assert_eq!(channel_candidates(&[2, 1], 64), vec![2, 1, 64]);
+        assert_eq!(channel_candidates(&[2, 1], 2), vec![2, 1]);
+        assert_eq!(channel_candidates(&[2, 1], 1), vec![1]);
+        // A device that reports no channels still gets one attempt with 1.
+        assert_eq!(channel_candidates(&[2, 1], 0), vec![1]);
+    }
+
+    #[test]
+    fn requested_device_must_be_listed() {
+        let mic = DeviceInfo {
+            id: DeviceId::new("test:mic"),
+            name: "Mic".to_string(),
+            channels: 1,
+            sample_rates: vec![48_000],
+        };
+        let list = || Ok(vec![mic.clone()]);
+        let no_default = || Ok(None);
+
+        let found = resolve_device("input", Some("test:mic"), None, list(), no_default);
+        assert_eq!(found.unwrap().id, mic.id);
+
+        let missing = resolve_device("input", Some("test:none"), None, list(), no_default);
+        assert!(missing.unwrap_err().contains("not found"));
+
+        // A configured device that is gone falls back to the default.
+        let gone = DeviceId::new("test:gone");
+        let fallback = resolve_device("input", None, Some(&gone), list(), || Ok(Some(mic.clone())));
+        assert_eq!(fallback.unwrap().id, mic.id);
+
+        let none = resolve_device("input", None, None, list(), no_default);
+        assert!(none.unwrap_err().contains("no default"));
+    }
+
+    #[test]
+    fn watch_reports_a_stream_error() {
+        let t0 = Instant::now();
+        let mut watch = Watch::new(t0);
+        let result = watch.check("input", Some(StreamError::DeviceUnavailable), 5, t0);
+        assert!(result.unwrap_err().starts_with("input stream stopped"));
+    }
+
+    #[test]
+    fn watch_accepts_callbacks_that_keep_coming() {
+        let t0 = Instant::now();
+        let mut watch = Watch::new(t0);
+        for k in 1..=30u64 {
+            let now = t0 + Duration::from_millis(100 * k);
+            assert!(watch.check("output", None, k, now).is_ok());
+        }
+    }
+
+    #[test]
+    fn watch_reports_callbacks_that_stopped_for_a_second() {
+        let t0 = Instant::now();
+        let mut watch = Watch::new(t0);
+        assert!(watch.check("output", None, 10, t0).is_ok());
+        let soon = t0 + Duration::from_millis(900);
+        assert!(watch.check("output", None, 10, soon).is_ok());
+        let late = t0 + Duration::from_secs(1);
+        let result = watch.check("output", None, 10, late);
+        assert!(result.unwrap_err().contains("no callback for 1 s"));
+    }
+}
