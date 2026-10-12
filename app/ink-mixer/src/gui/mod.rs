@@ -5,9 +5,11 @@
 //! here, at runtime, so `devices` and `run` work without a display.
 //!
 //! When the window opens, audio starts with the configured (or default)
-//! devices (#40). Choosing devices and starting / stopping come in #41.
+//! devices (#40). The window then lets the user choose the devices and
+//! start / stop (#41). Saving the choice comes in #42.
 
 mod app;
+mod device_panel;
 mod fonts;
 mod frame_limiter;
 mod meter;
@@ -41,8 +43,15 @@ pub fn run(config: &Config) -> ExitCode {
         Box::new(|cc| {
             report_renderer(cc);
             fonts::install(&cc.egui_ctx);
-            let (control, session) = start_audio(config);
-            Ok(Box::new(app::InkMixerApp::new(control, session)))
+            let backend = CpalBackend::new();
+            let (control, session) = start_audio(config, &backend);
+            // The window keeps the backend to start and stop the audio.
+            Ok(Box::new(app::InkMixerApp::new(
+                Box::new(backend),
+                config,
+                control,
+                session,
+            )))
         }),
     );
     match result {
@@ -59,13 +68,15 @@ pub fn run(config: &Config) -> ExitCode {
 
 /// Creates the shared controls and starts audio with the configured (or
 /// default) devices. A failure is returned for the window to show.
-fn start_audio(config: &Config) -> (Arc<MixerControl>, Result<AudioSession, String>) {
+fn start_audio(
+    config: &Config,
+    backend: &CpalBackend,
+) -> (Arc<MixerControl>, Result<AudioSession, String>) {
     let control = Arc::new(MixerControl::new());
     control.master.set_gain_db(INITIAL_MASTER_DB);
 
-    let backend = CpalBackend::new();
-    let session = choose_devices(&backend, config, None, None)
-        .and_then(|(input, output)| AudioSession::start(&backend, input, output, &control));
+    let session = choose_devices(backend, config, None, None)
+        .and_then(|(input, output)| AudioSession::start(backend, input, output, &control));
     match &session {
         Ok(session) => info!(
             "audio started: {} -> {}, {} Hz",
@@ -82,8 +93,8 @@ fn native_options() -> eframe::NativeOptions {
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(TITLE)
-            .with_inner_size([640.0, 420.0])
-            .with_min_inner_size([480.0, 320.0]),
+            .with_inner_size([640.0, 520.0])
+            .with_min_inner_size([480.0, 420.0]),
         renderer: renderer(),
         ..Default::default()
     }
@@ -140,6 +151,6 @@ mod tests {
     fn window_has_title_and_size() {
         let options = native_options();
         assert_eq!(options.viewport.title.as_deref(), Some(TITLE));
-        assert_eq!(options.viewport.inner_size, Some(egui::vec2(640.0, 420.0)));
+        assert_eq!(options.viewport.inner_size, Some(egui::vec2(640.0, 520.0)));
     }
 }

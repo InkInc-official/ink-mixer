@@ -8,6 +8,7 @@
 //! devices, because the numbers in `DeviceInfo` cannot be trusted (ALSA
 //! `sysdefault` reports that it supports everything).
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,88 @@ const STALL: Duration = Duration::from_secs(1);
 const PREFERRED_RATES: [u32; 3] = [48_000, 44_100, 96_000];
 /// The input channel used as the MIC (the first one, ADR-0007).
 const MIC_CHANNEL: usize = 0;
+
+/// One side of a session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Input,
+    Output,
+}
+
+impl Side {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        }
+    }
+
+    fn name_ja(self) -> &'static str {
+        match self {
+            Self::Input => "入力",
+            Self::Output => "出力",
+        }
+    }
+}
+
+/// Why a running session has to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionError {
+    /// The backend reported a fatal error of the stream.
+    Stream { side: Side, error: StreamError },
+    /// The stream delivered no callback for [`STALL`] (some systems report
+    /// nothing when a device is unplugged).
+    Stalled { side: Side },
+}
+
+impl SessionError {
+    /// A one-line explanation in Japanese for the window. The English
+    /// [`Display`](fmt::Display) text is meant for logs and the CLI.
+    pub fn message_ja(&self) -> String {
+        match self {
+            Self::Stream { side, error } => {
+                let side = side.name_ja();
+                match error {
+                    StreamError::DeviceUnavailable => {
+                        format!("{side}のデバイスが使えなくなりました（USB を抜きましたか？）")
+                    }
+                    StreamError::PermissionDenied => format!(
+                        "{side}のデバイスへのアクセスが拒否されました（OS のプライバシー設定を確認してください）"
+                    ),
+                    _ => format!("{side}のストリームが止まりました"),
+                }
+            }
+            Self::Stalled { side } => format!(
+                "{}が止まりました（{} 秒以上、音が来ません）",
+                side.name_ja(),
+                STALL.as_secs()
+            ),
+        }
+    }
+}
+
+impl fmt::Display for SessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stream { side, error } => write!(f, "{} stream stopped: {error}", side.name()),
+            Self::Stalled { side } => write!(
+                f,
+                "{} stopped: no callback for {} s (device unplugged?)",
+                side.name(),
+                STALL.as_secs()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
+
+/// Lets `?` turn the error into the `String` errors of the CLI.
+impl From<SessionError> for String {
+    fn from(e: SessionError) -> Self {
+        e.to_string()
+    }
+}
 
 /// Open input and output streams playing the MIC through the mixer.
 ///
@@ -99,11 +182,15 @@ impl AudioSession {
 
     /// Checks both streams at `now`: an error, or no callback for a second
     /// (some systems report nothing when a device is unplugged).
-    pub fn check(&mut self, now: Instant) -> Result<(), String> {
+    pub fn check(&mut self, now: Instant) -> Result<(), SessionError> {
         self.watch_input
-            .check("input", self.input.error(), self.input.callbacks(), now)?;
-        self.watch_output
-            .check("output", self.output.error(), self.output.callbacks(), now)
+            .check(Side::Input, self.input.error(), self.input.callbacks(), now)?;
+        self.watch_output.check(
+            Side::Output,
+            self.output.error(),
+            self.output.callbacks(),
+            now,
+        )
     }
 
     /// Returns the input stream.
@@ -314,22 +401,19 @@ impl Watch {
 
     fn check(
         &mut self,
-        side: &str,
+        side: Side,
         error: Option<StreamError>,
         callbacks: u64,
         now: Instant,
-    ) -> Result<(), String> {
-        if let Some(e) = error {
-            return Err(format!("{side} stream stopped: {e}"));
+    ) -> Result<(), SessionError> {
+        if let Some(error) = error {
+            return Err(SessionError::Stream { side, error });
         }
         if callbacks != self.callbacks {
             self.callbacks = callbacks;
             self.progress = now;
         } else if now.saturating_duration_since(self.progress) >= STALL {
-            return Err(format!(
-                "{side} stopped: no callback for {} s (device unplugged?)",
-                STALL.as_secs()
-            ));
+            return Err(SessionError::Stalled { side });
         }
         Ok(())
     }
@@ -408,8 +492,14 @@ mod tests {
     fn watch_reports_a_stream_error() {
         let t0 = Instant::now();
         let mut watch = Watch::new(t0);
-        let result = watch.check("input", Some(StreamError::DeviceUnavailable), 5, t0);
-        assert!(result.unwrap_err().starts_with("input stream stopped"));
+        let result = watch.check(Side::Input, Some(StreamError::DeviceUnavailable), 5, t0);
+        assert_eq!(
+            result.unwrap_err(),
+            SessionError::Stream {
+                side: Side::Input,
+                error: StreamError::DeviceUnavailable
+            }
+        );
     }
 
     #[test]
@@ -418,7 +508,7 @@ mod tests {
         let mut watch = Watch::new(t0);
         for k in 1..=30u64 {
             let now = t0 + Duration::from_millis(100 * k);
-            assert!(watch.check("output", None, k, now).is_ok());
+            assert!(watch.check(Side::Output, None, k, now).is_ok());
         }
     }
 
@@ -426,11 +516,54 @@ mod tests {
     fn watch_reports_callbacks_that_stopped_for_a_second() {
         let t0 = Instant::now();
         let mut watch = Watch::new(t0);
-        assert!(watch.check("output", None, 10, t0).is_ok());
+        assert!(watch.check(Side::Output, None, 10, t0).is_ok());
         let soon = t0 + Duration::from_millis(900);
-        assert!(watch.check("output", None, 10, soon).is_ok());
+        assert!(watch.check(Side::Output, None, 10, soon).is_ok());
         let late = t0 + Duration::from_secs(1);
-        let result = watch.check("output", None, 10, late);
-        assert!(result.unwrap_err().contains("no callback for 1 s"));
+        let result = watch.check(Side::Output, None, 10, late);
+        assert_eq!(
+            result.unwrap_err(),
+            SessionError::Stalled { side: Side::Output }
+        );
+    }
+
+    #[test]
+    fn errors_display_in_english_for_logs_and_the_cli() {
+        let lost = SessionError::Stream {
+            side: Side::Input,
+            error: StreamError::DeviceUnavailable,
+        };
+        assert_eq!(
+            lost.to_string(),
+            "input stream stopped: the audio device is no longer available"
+        );
+        let stalled = SessionError::Stalled { side: Side::Output };
+        assert_eq!(
+            stalled.to_string(),
+            "output stopped: no callback for 1 s (device unplugged?)"
+        );
+        assert_eq!(String::from(stalled), stalled.to_string());
+    }
+
+    #[test]
+    fn errors_have_a_japanese_line_for_each_kind() {
+        let stream = |side, error| SessionError::Stream { side, error };
+        assert_eq!(
+            stream(Side::Input, StreamError::DeviceUnavailable).message_ja(),
+            "入力のデバイスが使えなくなりました（USB を抜きましたか？）"
+        );
+        assert!(
+            stream(Side::Output, StreamError::PermissionDenied)
+                .message_ja()
+                .starts_with("出力のデバイスへのアクセスが拒否されました")
+        );
+        assert_eq!(
+            stream(Side::Output, StreamError::Other).message_ja(),
+            "出力のストリームが止まりました"
+        );
+        assert_eq!(
+            SessionError::Stalled { side: Side::Input }.message_ja(),
+            "入力が止まりました（1 秒以上、音が来ません）"
+        );
     }
 }
