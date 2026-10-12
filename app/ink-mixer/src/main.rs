@@ -1,5 +1,6 @@
 mod cli;
 mod devices;
+mod gui;
 mod run;
 
 use std::io::IsTerminal;
@@ -40,7 +41,7 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Devices) => devices::run(&CpalBackend::new(), &config),
         Some(Command::Run(args)) => run::run(&CpalBackend::new(), &config, &args),
-        None => ExitCode::SUCCESS,
+        None => gui::run(),
     }
 }
 
