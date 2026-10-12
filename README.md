@@ -28,8 +28,9 @@ Ink Mixer は、配信者向けの拡張可能なリアルタイム・オーデ�
 
 **必要なもの**
 
-- Rust（stable、edition 2024 に対応した 1.85 以降）
+- Rust（stable、1.95 以降。GUI の egui / eframe 0.36 が必要とするため）
 - Linux のみ: `libasound2-dev` と `pkg-config`（音声I/Oライブラリ `cpal` の ALSA バックエンド用）
+- Linux で窓（GUI）を開くには、X11 または Wayland、OpenGL（`libGL` / `libEGL`）、`libxkbcommon` が要ります（デスクトップ環境にはたいてい入っています。ビルドには要りません）
 
 Debian / Ubuntu の場合:
 
@@ -45,7 +46,7 @@ cargo run -p ink-mixer
 cargo run -p ink-mixer -- devices
 ```
 
-`devices` は、音声の入力・出力デバイスの一覧を表示します（既定のデバイスには `[default]` が付きます）。
+引数なしの `cargo run -p ink-mixer` は窓（GUI）を開きます。`devices` は、音声の入力・出力デバイスの一覧を表示します（既定のデバイスには `[default]` が付きます）。
 
 ### ドキュメント
 
@@ -84,8 +85,9 @@ See [ROADMAP.md](ROADMAP.md) for the plan ahead.
 
 **Requirements**
 
-- Rust (stable, 1.85 or later for edition 2024)
+- Rust (stable, 1.95 or later, required by egui / eframe 0.36 for the GUI)
 - Linux only: `libasound2-dev` and `pkg-config` (for the ALSA backend of the `cpal` audio I/O library)
+- To open the window (GUI) on Linux: X11 or Wayland, OpenGL (`libGL` / `libEGL`), and `libxkbcommon` (usually present on desktop systems; not needed to build)
 
 On Debian / Ubuntu:
 
@@ -101,7 +103,7 @@ cargo run -p ink-mixer
 cargo run -p ink-mixer -- devices
 ```
 
-`devices` lists audio input and output devices (the default device is marked `[default]`).
+Without arguments, `cargo run -p ink-mixer` opens the window (GUI). `devices` lists audio input and output devices (the default device is marked `[default]`).
 
 ### Documentation
 
