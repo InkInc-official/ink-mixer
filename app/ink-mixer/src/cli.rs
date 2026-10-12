@@ -1,6 +1,6 @@
 //! コマンドライン引数の定義。
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 /// Ink Mixer: extensible real-time audio console for streamers
 #[derive(Debug, Parser)]
@@ -10,10 +10,37 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-#[derive(Debug, PartialEq, Eq, Subcommand)]
+#[derive(Debug, PartialEq, Subcommand)]
 pub enum Command {
     /// List audio input and output devices
     Devices,
+    /// Play the microphone through the output (MIC -> Gain -> MASTER). Use headphones
+    Run(RunArgs),
+}
+
+/// `run` の引数。
+#[derive(Debug, PartialEq, Args)]
+pub struct RunArgs {
+    /// Input device ID (see `devices`). Defaults to the configured, then the default, input
+    #[arg(long, value_name = "ID")]
+    pub input: Option<String>,
+    /// Output device ID (see `devices`). Defaults to the configured, then the default, output
+    #[arg(long, value_name = "ID")]
+    pub output: Option<String>,
+    /// MIC gain in dB (-60 to +24)
+    #[arg(
+        long,
+        value_name = "DB",
+        default_value_t = 0.0,
+        allow_negative_numbers = true
+    )]
+    pub gain: f32,
+    /// Master volume in dB (-60 to +6)
+    #[arg(long, value_name = "DB", default_value_t = -12.0, allow_negative_numbers = true)]
+    pub master: f32,
+    /// How long to run, in seconds
+    #[arg(long, value_name = "N", default_value_t = 30)]
+    pub seconds: u64,
 }
 
 #[cfg(test)]
@@ -30,6 +57,48 @@ mod tests {
     fn parses_devices_subcommand() {
         let cli = Cli::try_parse_from(["ink-mixer", "devices"]).unwrap();
         assert_eq!(cli.command, Some(Command::Devices));
+    }
+
+    #[test]
+    fn run_has_defaults() {
+        let cli = Cli::try_parse_from(["ink-mixer", "run"]).unwrap();
+        assert_eq!(
+            cli.command,
+            Some(Command::Run(RunArgs {
+                input: None,
+                output: None,
+                gain: 0.0,
+                master: -12.0,
+                seconds: 30,
+            }))
+        );
+    }
+
+    #[test]
+    fn run_accepts_devices_and_negative_levels() {
+        let cli = Cli::try_parse_from([
+            "ink-mixer",
+            "run",
+            "--input",
+            "alsa:sysdefault:CARD=Headset",
+            "--output",
+            "alsa:sysdefault:CARD=Headset",
+            "--gain",
+            "-6",
+            "--master",
+            "-20.5",
+            "--seconds",
+            "180",
+        ])
+        .unwrap();
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected run");
+        };
+        assert_eq!(args.input.as_deref(), Some("alsa:sysdefault:CARD=Headset"));
+        assert_eq!(args.output.as_deref(), Some("alsa:sysdefault:CARD=Headset"));
+        assert_eq!(args.gain, -6.0);
+        assert_eq!(args.master, -20.5);
+        assert_eq!(args.seconds, 180);
     }
 
     #[test]
