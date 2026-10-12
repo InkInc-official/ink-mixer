@@ -3,29 +3,46 @@
 //! eframe with the glow (OpenGL) renderer, or wgpu with the `wgpu` feature.
 //! The window libraries (X11 / Wayland / OpenGL on Linux) are loaded only
 //! here, at runtime, so `devices` and `run` work without a display.
+//!
+//! When the window opens, audio starts with the configured (or default)
+//! devices (#40). Choosing devices and starting / stopping come in #41.
 
 mod app;
 mod fonts;
 mod frame_limiter;
+mod meter;
+mod strip;
 
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use eframe::egui;
+use ink_backend::CpalBackend;
+use ink_core::Config;
+use ink_core::graph::MixerControl;
 use tracing::{error, info};
+
+use crate::session::{AudioSession, choose_devices};
 
 /// The window title, also used by eframe as the application name.
 const TITLE: &str = "Ink Mixer";
 
+/// The master volume when the window opens. The microphone is heard at
+/// once, so it starts lower to avoid a loud surprise or feedback, as the
+/// `run` command does. Saved settings replace it in #42.
+const INITIAL_MASTER_DB: f32 = -12.0;
+
 /// Opens the window and runs until it is closed. Exits with 1 when the
 /// window cannot be opened (no display, no OpenGL, ...).
-pub fn run() -> ExitCode {
+pub fn run(config: &Config) -> ExitCode {
     let result = eframe::run_native(
         TITLE,
         native_options(),
         Box::new(|cc| {
             report_renderer(cc);
             fonts::install(&cc.egui_ctx);
-            Ok(Box::new(app::InkMixerApp::new()))
+            let (control, session) = start_audio(config);
+            Ok(Box::new(app::InkMixerApp::new(control, session)))
         }),
     );
     match result {
@@ -38,6 +55,27 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Creates the shared controls and starts audio with the configured (or
+/// default) devices. A failure is returned for the window to show.
+fn start_audio(config: &Config) -> (Arc<MixerControl>, Result<AudioSession, String>) {
+    let control = Arc::new(MixerControl::new());
+    control.master.set_gain_db(INITIAL_MASTER_DB);
+
+    let backend = CpalBackend::new();
+    let session = choose_devices(&backend, config, None, None)
+        .and_then(|(input, output)| AudioSession::start(&backend, input, output, &control));
+    match &session {
+        Ok(session) => info!(
+            "audio started: {} -> {}, {} Hz",
+            session.input_device().id,
+            session.output_device().id,
+            session.sample_rate()
+        ),
+        Err(e) => error!("audio could not start: {e}"),
+    }
+    (control, session)
 }
 
 fn native_options() -> eframe::NativeOptions {

@@ -1,39 +1,83 @@
-//! The main window (#39: the GUI foundation).
+//! The main window: the MIC and MASTER strips (#40).
 //!
-//! For now it shows sample Japanese labels, the frame rate switch, and a
-//! moving bar for checking the frame rate cap. The mixer strips replace the
-//! sample and the bar in #40.
+//! The window owns the audio session that plays MIC -> Gain -> MASTER
+//! (`session.rs`) and shares a `MixerControl` with it. The strips read and
+//! set the controls; the window never touches the audio engine itself.
 
-use std::f32::consts::TAU;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
+use ink_core::graph::MixerControl;
+use tracing::error;
 
 use super::frame_limiter::{FrameLimiter, FrameRate};
+use super::strip::Strip;
+use crate::session::AudioSession;
+
+/// While audio runs but the meters are still, the window checks this often
+/// for new sound and for a stream that stopped.
+const QUIET_CHECK: Duration = Duration::from_millis(500);
 
 /// The main window.
 pub struct InkMixerApp {
+    control: Arc<MixerControl>,
+    /// The running audio, or `None` when it could not start or stopped.
+    session: Option<AudioSession>,
+    /// The line at the bottom: the devices in use, or an error.
+    status: Status,
+    mic: Strip,
+    master: Strip,
     limiter: FrameLimiter,
     fps: FpsCounter,
-    /// The moving bar for checking the frame rate cap. Removed in #40.
-    demo: DemoBar,
+}
+
+/// What the bottom line shows.
+enum Status {
+    Running(String),
+    Error(String),
 }
 
 impl InkMixerApp {
-    /// Creates the window state at 60 fps with nothing moving.
-    pub fn new() -> Self {
+    /// Creates the window for `control`, with the audio session that was
+    /// started for it (or the error that kept it from starting).
+    pub fn new(control: Arc<MixerControl>, session: Result<AudioSession, String>) -> Self {
         let now = Instant::now();
+        let (session, status) = match session {
+            Ok(session) => {
+                let status = Status::Running(format!(
+                    "入力: {}  /  出力: {}  /  {} Hz",
+                    session.input_device().name,
+                    session.output_device().name,
+                    session.sample_rate()
+                ));
+                (Some(session), status)
+            }
+            Err(e) => (
+                None,
+                Status::Error(format!("音声を開始できませんでした: {e}")),
+            ),
+        };
         Self {
+            control,
+            session,
+            status,
+            mic: Strip::new("マイク", true, now),
+            master: Strip::new("マスター", false, now),
             limiter: FrameLimiter::new(FrameRate::default(), now),
             fps: FpsCounter::new(now),
-            demo: DemoBar::new(now),
         }
     }
 
-    /// Whether anything on screen moves and needs repainting by itself.
-    /// The meters set this in #40.
-    fn animating(&self) -> bool {
-        self.demo.running
+    /// Checks the streams; on a failure, stops the audio and shows why.
+    fn check_session(&mut self, now: Instant) {
+        if let Some(session) = &mut self.session
+            && let Err(e) = session.check(now)
+        {
+            error!("audio stopped: {e}");
+            self.session = None;
+            self.status = Status::Error(format!("音声が止まりました: {e}"));
+        }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -52,34 +96,27 @@ impl InkMixerApp {
         });
     }
 
-    fn central(&mut self, ui: &mut egui::Ui) {
-        ui.heading("ミキサー");
-        ui.label("マイク ・ BGM ・ 効果音 ・ 外部入力 ・ マスター");
-        ui.label("ノイズ除去 ・ 声を整える ・ 低音カット ・ リバーブ");
-        ui.weak("ミキサーの画面は、この土台の上に作ります（#40）。");
-        ui.add_space(16.0);
-
-        ui.group(|ui| {
-            ui.label("動作確認用（#40 で消します）");
-            ui.horizontal(|ui| {
-                let label = if self.demo.running {
-                    "止める"
-                } else {
-                    "動かす"
-                };
-                if ui.toggle_value(&mut self.demo.running, label).changed() {
-                    self.demo.start = Instant::now();
-                }
-                ui.weak("動かしている間だけ、上限の fps で描き直します。");
-            });
-            draw_bar(ui, self.demo.level(Instant::now()));
-        });
+    fn status_line(&self, ui: &mut egui::Ui) {
+        match &self.status {
+            Status::Running(text) => {
+                ui.label(text);
+            }
+            Status::Error(text) => {
+                ui.colored_label(egui::Color32::from_rgb(230, 90, 90), text);
+            }
+        }
     }
-}
 
-impl Default for InkMixerApp {
-    fn default() -> Self {
-        Self::new()
+    fn central(&mut self, ui: &mut egui::Ui) {
+        ui.colored_label(
+            egui::Color32::from_rgb(230, 190, 60),
+            "注意：マイクの音を出力しています。ヘッドホンかヘッドセットで使ってください",
+        );
+        ui.add_space(8.0);
+        ui.horizontal_top(|ui| {
+            self.mic.show(ui, &self.control.mic);
+            self.master.show(ui, &self.control.master);
+        });
     }
 }
 
@@ -87,13 +124,19 @@ impl eframe::App for InkMixerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let frame_start = Instant::now();
         self.fps.count(frame_start);
+        self.check_session(frame_start);
+        self.mic.update_meter(&self.control.mic, frame_start);
+        self.master.update_meter(&self.control.master, frame_start);
 
         egui::Panel::top("top_bar").show(ui, |ui| self.top_bar(ui));
+        egui::Panel::bottom("status").show(ui, |ui| self.status_line(ui));
         egui::CentralPanel::default().show(ui, |ui| self.central(ui));
 
+        let meters_active = self.mic.active() || self.master.active();
         let predicted = Duration::from_secs_f32(ui.input(|i| i.predicted_dt));
         if let Some(delay) = repaint_delay(
-            self.animating(),
+            meters_active,
+            self.session.is_some(),
             &mut self.limiter,
             frame_start,
             Instant::now(),
@@ -104,17 +147,28 @@ impl eframe::App for InkMixerApp {
     }
 }
 
-/// Decides whether to schedule the next frame. While something moves, the
-/// next frame comes from the frame rate cap; otherwise nothing is scheduled
-/// and egui repaints only on input, so an idle window uses almost no CPU.
+/// Decides when to repaint by itself:
+///
+/// - the meters move: at the frame rate cap;
+/// - audio runs but the meters are still: every [`QUIET_CHECK`], to notice
+///   new sound and a stream that stopped;
+/// - no audio: never (egui repaints on input only), so an idle window uses
+///   almost no CPU.
 fn repaint_delay(
-    animating: bool,
+    meters_active: bool,
+    audio_running: bool,
     limiter: &mut FrameLimiter,
     frame_start: Instant,
     now: Instant,
     predicted_dt: Duration,
 ) -> Option<Duration> {
-    animating.then(|| limiter.delay_after(frame_start, now, predicted_dt))
+    if meters_active {
+        Some(limiter.delay_after(frame_start, now, predicted_dt))
+    } else if audio_running {
+        Some(QUIET_CHECK + predicted_dt)
+    } else {
+        None
+    }
 }
 
 /// Counts frames to show the frame rate actually drawn.
@@ -150,62 +204,44 @@ impl FpsCounter {
     }
 }
 
-/// A bar that moves while running, for checking the frame rate cap.
-#[derive(Debug)]
-struct DemoBar {
-    running: bool,
-    start: Instant,
-}
-
-impl DemoBar {
-    fn new(now: Instant) -> Self {
-        Self {
-            running: false,
-            start: now,
-        }
-    }
-
-    /// The bar length in 0.0..=1.0: a slow sine while running, 0 otherwise.
-    fn level(&self, now: Instant) -> f32 {
-        if !self.running {
-            return 0.0;
-        }
-        let t = now.saturating_duration_since(self.start).as_secs_f32();
-        0.5 - 0.5 * (t * TAU * 0.5).cos()
-    }
-}
-
-fn draw_bar(ui: &mut egui::Ui, level: f32) {
-    let width = ui.available_width().min(400.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 16.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, 2.0, egui::Color32::from_gray(40));
-    let mut filled = rect;
-    filled.set_width(rect.width() * level.clamp(0.0, 1.0));
-    painter.rect_filled(filled, 2.0, egui::Color32::from_rgb(70, 190, 110));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn nothing_is_scheduled_while_idle() {
+    fn moving_meters_repaint_at_the_frame_rate_cap() {
         let t0 = Instant::now();
-        let mut limiter = FrameLimiter::new(FrameRate::Fps60, t0);
+        let mut limiter = FrameLimiter::new(FrameRate::Fps30, t0);
         assert_eq!(
-            repaint_delay(false, &mut limiter, t0, t0, Duration::ZERO),
-            None
+            repaint_delay(true, true, &mut limiter, t0, t0, Duration::ZERO),
+            Some(FrameRate::Fps30.interval())
         );
     }
 
     #[test]
-    fn the_cap_schedules_frames_while_animating() {
+    fn still_meters_with_audio_check_every_half_second() {
         let t0 = Instant::now();
-        let mut limiter = FrameLimiter::new(FrameRate::Fps30, t0);
+        let mut limiter = FrameLimiter::new(FrameRate::Fps60, t0);
         assert_eq!(
-            repaint_delay(true, &mut limiter, t0, t0, Duration::ZERO),
-            Some(FrameRate::Fps30.interval())
+            repaint_delay(false, true, &mut limiter, t0, t0, Duration::ZERO),
+            Some(QUIET_CHECK)
+        );
+        assert_eq!(QUIET_CHECK, Duration::from_millis(500));
+        // egui subtracts the predicted frame time, so it is added back.
+        let predicted = Duration::from_millis(16);
+        assert_eq!(
+            repaint_delay(false, true, &mut limiter, t0, t0, predicted),
+            Some(QUIET_CHECK + predicted)
+        );
+    }
+
+    #[test]
+    fn nothing_is_scheduled_without_audio() {
+        let t0 = Instant::now();
+        let mut limiter = FrameLimiter::new(FrameRate::Fps60, t0);
+        assert_eq!(
+            repaint_delay(false, false, &mut limiter, t0, t0, Duration::ZERO),
+            None
         );
     }
 
@@ -220,14 +256,13 @@ mod tests {
     }
 
     #[test]
-    fn demo_bar_moves_only_while_running() {
-        let t0 = Instant::now();
-        let mut bar = DemoBar::new(t0);
-        assert_eq!(bar.level(t0 + Duration::from_secs(1)), 0.0);
-
-        bar.running = true;
-        assert_eq!(bar.level(t0), 0.0);
-        let top = bar.level(t0 + Duration::from_secs(1));
-        assert!((top - 1.0).abs() < 1e-6, "{top}");
+    fn a_session_that_failed_to_start_shows_the_error() {
+        let control = Arc::new(MixerControl::new());
+        let app = InkMixerApp::new(control, Err("no default input device".to_string()));
+        assert!(app.session.is_none());
+        match &app.status {
+            Status::Error(text) => assert!(text.contains("no default input device")),
+            Status::Running(_) => panic!("expected an error"),
+        }
     }
 }

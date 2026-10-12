@@ -2,6 +2,7 @@ mod cli;
 mod devices;
 mod gui;
 mod run;
+mod session;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -41,7 +42,7 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Devices) => devices::run(&CpalBackend::new(), &config),
         Some(Command::Run(args)) => run::run(&CpalBackend::new(), &config, &args),
-        None => gui::run(),
+        None => gui::run(&config),
     }
 }
 
