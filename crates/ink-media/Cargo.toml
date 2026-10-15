@@ -1,0 +1,15 @@
+[package]
+name = "ink-media"
+description = "Ink Mixer media: decoding audio files (WAV / MP3) and resampling"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ink-core = { path = "../ink-core" }
+# Pinned: the 0.6 series is new and its API may change (ADR-0009). Only the
+# formats and codecs Phase 2 needs are enabled.
+symphonia = { version = "=0.6.1", default-features = false, features = ["mp3", "wav", "pcm", "id3v2"] }
+rubato = "5.0.1"
