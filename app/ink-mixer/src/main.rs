@@ -3,6 +3,7 @@ mod devices;
 mod gui;
 mod run;
 mod session;
+mod settings;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -37,13 +38,23 @@ fn main() -> ExitCode {
         std::env::consts::OS
     );
 
-    let config = load_config();
+    let Loaded { config, save_to } = load_config();
 
     match cli.command {
         Some(Command::Devices) => devices::run(&CpalBackend::new(), &config),
         Some(Command::Run(args)) => run::run(&CpalBackend::new(), &config, &args),
-        None => gui::run(&config),
+        None => gui::run(&config, save_to),
     }
+}
+
+/// The configuration for this run, and where the window may save it.
+struct Loaded {
+    /// The configuration, or the defaults when the file could not be read.
+    config: Config,
+    /// `Ok(path)` when the settings are saved there. `Err(reason)` when they
+    /// must not be saved, because a file that could not be read would be
+    /// overwritten with the defaults; `reason` is shown in the window.
+    save_to: Result<PathBuf, String>,
 }
 
 /// 設定ファイルの場所（OS 標準の設定ディレクトリ配下の `config.toml`）
@@ -53,10 +64,18 @@ fn config_path() -> Option<PathBuf> {
 
 /// 設定を読み込む。無ければデフォルトで作成する。
 /// 読めないときは warn を出し、ファイルは書き換えずにデフォルト値で続行する。
-fn load_config() -> Config {
-    let Some(path) = config_path() else {
+/// その実行では設定を保存しない（読めないファイルをデフォルトで上書きしない）。
+fn load_config() -> Loaded {
+    load_from(config_path())
+}
+
+fn load_from(path: Option<PathBuf>) -> Loaded {
+    let Some(path) = path else {
         warn!("config directory not found; using default settings");
-        return Config::default();
+        return Loaded {
+            config: Config::default(),
+            save_to: Err("設定ファイルの場所が見つからないため、設定は保存されません".to_string()),
+        };
     };
     match Config::load_or_create(&path) {
         Ok(config) => {
@@ -65,11 +84,94 @@ fn load_config() -> Config {
                 path.display(),
                 config.version
             );
-            config
+            Loaded {
+                config,
+                save_to: Ok(path),
+            }
         }
         Err(e) => {
             warn!("{e} ({}); using default settings", path.display());
-            Config::default()
+            Loaded {
+                config: Config::default(),
+                save_to: Err(format!(
+                    "設定ファイル（{}）を読めないため、設定は保存されません。直すか、削除してください",
+                    path.display()
+                )),
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A fresh directory under the system temp dir, unique per test.
+    fn test_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("ink-mixer-main-test-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_missing_file_is_created_and_settings_are_saved_there() {
+        let path = test_dir("create").join("sub").join("config.toml");
+        let loaded = load_from(Some(path.clone()));
+        assert_eq!(loaded.config, Config::default());
+        assert_eq!(loaded.save_to, Ok(path.clone()));
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn a_version_1_file_with_levels_is_loaded() {
+        let path = test_dir("v1").join("config.toml");
+        fs::write(
+            &path,
+            "version = 1\n[audio]\ninput_device = \"alsa:default\"\n[mixer]\nmaster_db = -20.0\n",
+        )
+        .unwrap();
+        let loaded = load_from(Some(path.clone()));
+        assert_eq!(loaded.config.mixer.master_db(), Some(-20.0));
+        assert_eq!(loaded.save_to, Ok(path));
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_not_overwritten_and_not_saved() {
+        let path = test_dir("broken").join("config.toml");
+        fs::write(&path, "broken").unwrap();
+        let loaded = load_from(Some(path.clone()));
+
+        assert_eq!(loaded.config, Config::default());
+        assert_eq!(
+            loaded.save_to,
+            Err(format!(
+                "設定ファイル（{}）を読めないため、設定は保存されません。直すか、削除してください",
+                path.display()
+            ))
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "broken");
+    }
+
+    #[test]
+    fn a_newer_version_is_not_overwritten_and_not_saved() {
+        let path = test_dir("newer").join("config.toml");
+        let text = "version = 99\nsomething_new = true\n";
+        fs::write(&path, text).unwrap();
+        let loaded = load_from(Some(path.clone()));
+        assert!(loaded.save_to.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    }
+
+    #[test]
+    fn no_config_directory_means_no_saving() {
+        let loaded = load_from(None);
+        assert_eq!(loaded.config, Config::default());
+        assert_eq!(
+            loaded.save_to,
+            Err("設定ファイルの場所が見つからないため、設定は保存されません".to_string())
+        );
     }
 }

@@ -10,5 +10,5 @@ pub mod graph;
 mod config;
 mod device_id;
 
-pub use config::{AudioConfig, CONFIG_VERSION, Config, ConfigError};
+pub use config::{AudioConfig, CONFIG_VERSION, Config, ConfigError, MixerConfig};
 pub use device_id::DeviceId;
