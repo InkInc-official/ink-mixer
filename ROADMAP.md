@@ -18,7 +18,7 @@
 
 1. **リポジトリを静かに公開する** — 宣伝はしません。
 2. **Phase 1・2** — マイク・BGM・効果音を混ぜて出力できるところまで作ります。
-3. **文字起こし（STT）の Spike** — ローカルで動く文字起こしエンジンを試作し、遅延・CPU 使用率・日本語の認識精度と、創作PC（RAM 8GB）でミキサーと同時に動くかを確かめます。エンジンは結果を元に ADR で決めます。
+3. **文字起こし（STT）の Spike** — ローカルで動く文字起こしエンジンを試作し、遅延・CPU 使用率・日本語の認識精度と、創作PC（RAM 8GB）でミキサーと同時に動くかを確かめます。あわせて、結果（漢字まじり）を読み（カタカナ）に直して、カタカナで登録したトリガーワードと照らし合わせられるかも確かめます。エンジンは結果を元に ADR で決めます。
 4. **ボイストリガーまでの最短の道** — Phase 5・6 のうち、ボイストリガーに必要な最小限だけを先に作ります（マイクの分岐、文字起こしの処理、決めた言葉を認識したら効果音を鳴らす、cooldown）。Phase 3・4 と、Phase 5・6 の残り（OBS 字幕、複数のアクションなど）はその後に作ります。
 5. **所属ライバーの先行利用** — Ink Inc. 所属のライバーに実際の配信で使ってもらい、見つかった問題を直します。
 6. **お披露目** — 目玉はボイストリガーです（例：「オーマイガー」と言うと効果音が鳴る）。
@@ -63,6 +63,7 @@ MIC -> Gain -> MASTER -> Output
 - Loop
 - volume
 - basic UI
+- 音源・SE の登録（「音源取り込み」ページ。Ink Mixer のフォルダへコピーする。「権利を確認した音源を入れてください」と表示する）
 - 配布前に `cargo-about` で依存crateのライセンス表記を作る
 
 **完了条件:** MIC + BGM + SE を同時にミックスして出力できる。
@@ -72,8 +73,10 @@ MIC -> Gain -> MASTER -> Output
 ### Phase 3 — Built-in DSP
 
 - Gate / EQ / Compressor / Limiter / Reverb
+- Echo / Delay
 - Noise suppression 候補
 - Ducking
+- 歌枠プリセット（声にだけリバーブ・コンプ等をかけ、音源にはかけない。音源と声の音量バランスの初期値）
 
 **完了条件:** 初心者が外部プラグイン無しで、配信用の基本的な音声処理を行える。
 
@@ -85,6 +88,7 @@ MIC -> Gain -> MASTER -> Output
 - device events
 - routing
 - virtual output 連携
+- PC 内のアプリの音を 1 チャンネルとして取り込む（中立な入口。Linux は PipeWire、Windows は Win10 以降の仕組み。作るときに ADR）
 
 ### Phase 5 — STT（音声文字起こし）
 
@@ -134,6 +138,11 @@ MIC -> Gain -> MASTER -> Output
 - LV2 プラグインの同梱（プラグインごとのライセンス確認と、ソースの入手方法の提示が前提）
 - プラグインをダウンロードできる仕組み（検討）
 
+### 将来の検討事項
+
+- 外部入力チャンネル（音源用の端末を USB アダプタ等でつなぐ。別機器の時計のずれの補正が必要。作るときに ADR）
+- 口癖禁止ゲーム（配信者の口癖をトリガーワードにしてハズレ音を鳴らし、回数を数える。Event → Condition → Action の汎用の仕組みに乗る）
+
 ### 初期版でやらないこと
 
 v0.0.x / 最初の Alpha では、以下を完成させようとしない。
@@ -146,7 +155,7 @@ v0.0.x / 最初の Alpha では、以下を完成させようとしない。
 - 完全な Plugin sandbox
 - MIDI 全面対応
 - 高度な録音編集
-- 全配信サービス固有の連携
+- 全配信サービス固有の連携（外部のサービスとは連携を作らない方針: [ADR-0008](docs/adr/0008-external-services.md)）
 - 外部 Plugin 独自 GUI の完全対応
 
 ---
@@ -165,7 +174,7 @@ Separately from the development phases, the release and public launch proceed in
 
 1. **Publish the repository quietly** — no promotion.
 2. **Phase 1 and 2** — up to mixing and outputting the microphone, BGM, and sound effects.
-3. **Speech-to-text (STT) spike** — prototype a local speech-to-text engine and check latency, CPU usage, Japanese recognition accuracy, and whether it runs alongside the mixer on the main development PC (8 GB RAM). The engine will be chosen in an ADR based on the results.
+3. **Speech-to-text (STT) spike** — prototype a local speech-to-text engine and check latency, CPU usage, Japanese recognition accuracy, and whether it runs alongside the mixer on the main development PC (8 GB RAM). It also checks whether the result (which comes back with kanji) can be converted to its reading (katakana) and matched against trigger words registered in katakana. The engine will be chosen in an ADR based on the results.
 4. **Shortest path to voice triggers** — build only the minimum parts of Phase 5 and 6 needed for voice triggers first (a microphone branch, speech-to-text processing, playing a sound effect when a chosen phrase is recognized, and a cooldown). Phase 3 and 4, and the rest of Phase 5 and 6 (OBS captions, multiple actions, etc.), come after that.
 5. **Early use by Ink Inc.'s affiliated streamers** — they use it in real streams, and the problems they find are fixed.
 6. **Public launch** — the headline feature is voice triggers (e.g., saying "Oh my god" plays a sound effect).
@@ -210,6 +219,7 @@ MIC -> Gain -> MASTER -> Output
 - Loop
 - Volume
 - Basic UI
+- Registering audio and sound effects (an "import audio" page; files are copied into Ink Mixer's folder; a notice asks for audio whose rights have been checked)
 - Generate third-party license notices with `cargo-about` before distribution
 
 **Done when:** MIC + BGM + SE can be mixed together and output.
@@ -219,8 +229,10 @@ MIC -> Gain -> MASTER -> Output
 ### Phase 3 — Built-in DSP
 
 - Gate / EQ / Compressor / Limiter / Reverb
+- Echo / Delay
 - Noise suppression (candidate)
 - Ducking
+- Singing-stream preset (reverb, compression, etc. only on the voice, not on the audio source; initial volume balance between the audio and the voice)
 
 **Done when:** beginners can do basic streaming audio processing without external plugins.
 
@@ -232,6 +244,7 @@ MIC -> Gain -> MASTER -> Output
 - Device events
 - Routing
 - Virtual output integration
+- Take in the sound of applications on the PC as one channel (a neutral input; PipeWire on Linux, the mechanism available since Windows 10 on Windows; an ADR when it is built)
 
 ### Phase 5 — STT (Speech-to-Text)
 
@@ -281,6 +294,11 @@ The first goal is to safely insert one simple LV2 effect into the graph, then ex
 - Bundling LV2 plugins (requires checking each plugin's license and providing how to get its source)
 - A way to download plugins (under consideration)
 
+### Under consideration
+
+- An external input channel (connecting a separate device for audio sources, for example through a USB adapter; needs correction for the clock drift of the other device; an ADR when it is built)
+- A "verbal tic game" (the streamer's verbal tic is a trigger word that plays a miss sound and counts how often it happens; built on the general Event → Condition → Action system)
+
 ### Out of scope for the first releases
 
 v0.0.x / the first Alpha will not try to complete:
@@ -293,5 +311,5 @@ v0.0.x / the first Alpha will not try to complete:
 - Full plugin sandboxing
 - Full MIDI support
 - Advanced recording/editing
-- Integrations specific to every streaming service
+- Integrations specific to every streaming service (Ink Mixer does not build integrations with external services: [ADR-0008](docs/adr/0008-external-services.md), in Japanese)
 - Full support for external plugins' own GUIs

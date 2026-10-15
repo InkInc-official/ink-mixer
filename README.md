@@ -48,6 +48,20 @@ cargo run -p ink-mixer -- devices
 
 引数なしの `cargo run -p ink-mixer` は窓（GUI）を開きます。`devices` は、音声の入力・出力デバイスの一覧を表示します（既定のデバイスには `[default]` が付きます）。
 
+### 音源について
+
+Ink Mixer は、特定のサービス（YouTube や Spotify など）から音を取り込む機能を作りません。BGM や効果音は、権利を確認した音源ファイル（フリー BGM など）を Ink Mixer のフォルダに入れて使うのが基本です。入力端子のように、つながれた音を混ぜるだけの入口（中身を知らない入口）は作ることがあります。
+
+流す音の権利の確認は、使う人の責任です（配信サービスの規約にも従ってください）。マイクで流す、OS 側で他のアプリの音と混ぜる、といった方法を、Ink Mixer が技術的に塞ぐことはありません。
+
+配信の許諾がある音源の例（機能ではなく、情報です）:
+
+- 自作の音源
+- 配信での利用が許諾されているものとして、購入・依頼した音源
+- 許諾済みの歌枠アプリなど
+
+これは一般的な案内で、法的な助言ではありません。方針の理由は [ADR-0008](docs/adr/0008-external-services.md) を参照してください。
+
 ### ドキュメント
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 設計の正典（Architecture Blueprint）
@@ -104,6 +118,20 @@ cargo run -p ink-mixer -- devices
 ```
 
 Without arguments, `cargo run -p ink-mixer` opens the window (GUI). `devices` lists audio input and output devices (the default device is marked `[default]`).
+
+### About audio sources
+
+Ink Mixer does not build features that take in audio from a specific service (such as YouTube or Spotify). For BGM and sound effects, the basic way is to put audio files whose rights you have checked (royalty-free BGM, for example) into Ink Mixer's folder. It may provide neutral inputs: inputs that know nothing about what is connected and only mix the sound that comes in, like an input jack.
+
+Checking the rights to the audio you play is your responsibility (and follow the terms of your streaming service as well). Ink Mixer does not try to block workarounds technically, such as playing sound through the microphone or letting the OS mix in the sound of other applications.
+
+Examples of audio that is permitted for streaming (information, not a feature):
+
+- Audio you made yourself
+- Audio you bought or commissioned with permission to use it in streams
+- Singing-stream apps that are licensed for it, and similar
+
+This is general information, not legal advice. For the reasoning, see [ADR-0008](docs/adr/0008-external-services.md) (in Japanese).
 
 ### Documentation
 
