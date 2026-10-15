@@ -7,6 +7,11 @@
 //! The selected ID is kept even when the device is not in the list, so a
 //! device that disappeared for a moment (or was unplugged) is still shown as
 //! selected, and the window can say that it was not found.
+//!
+//! The panel also remembers that the *user* chose a device
+//! ([`DevicePanel::take_user_changed`]). Only that choice is saved (#42):
+//! the initial selection, a refresh of the lists, and a default used in place
+//! of a missing device are not the user's choice.
 
 use eframe::egui;
 use ink_backend::{AudioBackend, DeviceId, DeviceInfo};
@@ -58,6 +63,9 @@ pub struct DevicePanel {
     outputs: Vec<DeviceInfo>,
     selected_input: Option<DeviceId>,
     selected_output: Option<DeviceId>,
+    /// Set when the user chose a device in [`DevicePanel::show`]; cleared by
+    /// [`DevicePanel::take_user_changed`].
+    user_changed: bool,
 }
 
 impl DevicePanel {
@@ -104,13 +112,11 @@ impl DevicePanel {
     }
 
     /// Returns the selected input ID.
-    #[cfg(test)]
     pub fn selected_input(&self) -> Option<&DeviceId> {
         self.selected_input.as_ref()
     }
 
     /// Returns the selected output ID.
-    #[cfg(test)]
     pub fn selected_output(&self) -> Option<&DeviceId> {
         self.selected_output.as_ref()
     }
@@ -130,6 +136,34 @@ impl DevicePanel {
         let output = find(&self.outputs, output_id)
             .ok_or_else(|| SelectionError::OutputMissing(output_id.clone()))?;
         Ok((input.clone(), output.clone()))
+    }
+
+    /// Does what [`show`](Self::show) does when the user picks devices in
+    /// the combo boxes, for tests of the code around the panel.
+    #[cfg(test)]
+    pub fn user_selects(&mut self, input: Option<DeviceId>, output: Option<DeviceId>) {
+        let before = (self.selected_input.clone(), self.selected_output.clone());
+        self.selected_input = input;
+        self.selected_output = output;
+        self.note_selection_change(&before);
+    }
+
+    /// Returns whether the user chose a device since the last call, and
+    /// clears the mark. The initial selection ([`select`](Self::select),
+    /// [`select_first_listed`](Self::select_first_listed)) and a refresh of
+    /// the lists do not count.
+    pub fn take_user_changed(&mut self) -> bool {
+        std::mem::take(&mut self.user_changed)
+    }
+
+    /// Compares the selection with `before`, marks a difference as the
+    /// user's choice, and returns whether it differs.
+    fn note_selection_change(&mut self, before: &(Option<DeviceId>, Option<DeviceId>)) -> bool {
+        let changed = *before != (self.selected_input.clone(), self.selected_output.clone());
+        if changed {
+            self.user_changed = true;
+        }
+        changed
     }
 
     /// Returns whether both selected devices are listed, so "start" can work.
@@ -154,7 +188,7 @@ impl DevicePanel {
             &self.outputs,
             &mut self.selected_output,
         );
-        let changed = before != (self.selected_input.clone(), self.selected_output.clone());
+        let changed = self.note_selection_change(&before);
 
         let mut pressed = None;
         ui.horizontal(|ui| {
@@ -378,6 +412,77 @@ mod tests {
         assert_eq!(decide(None, true, false), None, "stopped: only select");
         assert_eq!(decide(None, false, true), None);
         assert_eq!(decide(None, false, false), None);
+    }
+
+    #[test]
+    fn the_initial_selection_and_a_refresh_are_not_the_users_choice() {
+        let mut panel = DevicePanel::new();
+        panel.set_lists(vec![headset(), hid()], vec![headset(), hid()]);
+        let configured = DeviceId::new("alsa:headset");
+        panel.select_first_listed(&[Some(&configured)], &[Some(&configured)]);
+        assert!(!panel.take_user_changed());
+
+        panel.select(Some(DeviceId::new("alsa:hid")), None);
+        assert!(!panel.take_user_changed(), "select is for the program");
+
+        // A refresh, even one that no longer lists the selected device.
+        panel.set_lists(vec![hid()], vec![hid()]);
+        assert!(!panel.take_user_changed());
+    }
+
+    #[test]
+    fn choosing_a_device_marks_the_users_choice_until_it_is_taken() {
+        let mut panel = DevicePanel::new();
+        panel.set_lists(vec![headset(), hid()], vec![headset(), hid()]);
+        panel.select(
+            Some(DeviceId::new("alsa:headset")),
+            Some(DeviceId::new("alsa:headset")),
+        );
+
+        // What `show` does around the combo boxes: the user picks the HID.
+        let before = (
+            panel.selected_input().cloned(),
+            panel.selected_output().cloned(),
+        );
+        panel.selected_input = Some(DeviceId::new("alsa:hid"));
+        assert!(panel.note_selection_change(&before));
+
+        assert!(panel.take_user_changed());
+        assert!(!panel.take_user_changed(), "the mark is cleared once taken");
+    }
+
+    #[test]
+    fn looking_at_the_lists_without_choosing_leaves_no_mark() {
+        let mut panel = DevicePanel::new();
+        panel.set_lists(vec![headset()], vec![headset()]);
+        panel.select(
+            Some(DeviceId::new("alsa:headset")),
+            Some(DeviceId::new("alsa:headset")),
+        );
+        let before = (
+            panel.selected_input().cloned(),
+            panel.selected_output().cloned(),
+        );
+        // The same device chosen again is not a change.
+        panel.selected_input = Some(DeviceId::new("alsa:headset"));
+        assert!(!panel.note_selection_change(&before));
+        assert!(!panel.take_user_changed());
+    }
+
+    #[test]
+    fn a_choice_is_kept_when_the_selection_changes_again_before_it_is_taken() {
+        let mut panel = DevicePanel::new();
+        panel.set_lists(vec![headset(), hid()], vec![headset(), hid()]);
+        panel.select(None, None);
+        for id in ["alsa:hid", "alsa:headset"] {
+            let before = (
+                panel.selected_input().cloned(),
+                panel.selected_output().cloned(),
+            );
+            panel.selected_output = Some(DeviceId::new(id));
+            assert!(panel.note_selection_change(&before));
+        }
+        assert!(panel.take_user_changed());
     }
 
     #[test]

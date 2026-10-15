@@ -4,9 +4,10 @@
 //! The window libraries (X11 / Wayland / OpenGL on Linux) are loaded only
 //! here, at runtime, so `devices` and `run` work without a display.
 //!
-//! When the window opens, audio starts with the configured (or default)
-//! devices (#40). The window then lets the user choose the devices and
-//! start / stop (#41). Saving the choice comes in #42.
+//! When the window opens, the saved levels are restored and audio starts
+//! with the configured (or default) devices (#40). The window then lets the
+//! user choose the devices and start / stop (#41), and saves the choices and
+//! the levels (#42).
 
 mod app;
 mod device_panel;
@@ -15,28 +16,30 @@ mod frame_limiter;
 mod meter;
 mod strip;
 
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Instant;
 
 use eframe::egui;
 use ink_backend::CpalBackend;
 use ink_core::Config;
 use ink_core::graph::MixerControl;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::session::{AudioSession, choose_devices};
+use crate::settings::{self, Settings};
 
 /// The window title, also used by eframe as the application name.
 const TITLE: &str = "Ink Mixer";
 
-/// The master volume when the window opens. The microphone is heard at
-/// once, so it starts lower to avoid a loud surprise or feedback, as the
-/// `run` command does. Saved settings replace it in #42.
-const INITIAL_MASTER_DB: f32 = -12.0;
-
 /// Opens the window and runs until it is closed. Exits with 1 when the
 /// window cannot be opened (no display, no OpenGL, ...).
-pub fn run(config: &Config) -> ExitCode {
+///
+/// `save_to` tells where the settings are saved: `Ok(path)`, or `Err(reason)`
+/// when they must not be saved (the file could not be read), with the reason
+/// to show in the window.
+pub fn run(config: &Config, save_to: Result<PathBuf, String>) -> ExitCode {
     let result = eframe::run_native(
         TITLE,
         native_options(),
@@ -45,12 +48,14 @@ pub fn run(config: &Config) -> ExitCode {
             fonts::install(&cc.egui_ctx);
             let backend = CpalBackend::new();
             let (control, session) = start_audio(config, &backend);
+            let settings = make_settings(config, save_to, &control);
             // The window keeps the backend to start and stop the audio.
             Ok(Box::new(app::InkMixerApp::new(
                 Box::new(backend),
                 config,
                 control,
                 session,
+                settings,
             )))
         }),
     );
@@ -66,14 +71,40 @@ pub fn run(config: &Config) -> ExitCode {
     }
 }
 
-/// Creates the shared controls and starts audio with the configured (or
-/// default) devices. A failure is returned for the window to show.
+/// Creates the shared controls with the saved levels restored. Nothing is
+/// saved on the first run; the master volume is then the start value, and
+/// never higher than it (see `settings.rs`).
+fn new_control(config: &Config) -> Arc<MixerControl> {
+    let control = Arc::new(MixerControl::new());
+    settings::restore(&control, &config.mixer);
+    control
+}
+
+/// Creates the settings to save, from the controls as they were restored.
+fn make_settings(
+    config: &Config,
+    save_to: Result<PathBuf, String>,
+    control: &MixerControl,
+) -> Settings {
+    let now = Instant::now();
+    match save_to {
+        Ok(path) => Settings::new(config.clone(), path, control, now),
+        Err(reason) => {
+            warn!("the settings are not saved: {reason}");
+            Settings::disabled(config.clone(), reason, control, now)
+        }
+    }
+}
+
+/// Creates the shared controls (with the saved levels restored) and starts
+/// audio with the configured (or default) devices. The levels are set
+/// before the audio starts, so the first block already uses them. A failure
+/// to start is returned for the window to show.
 fn start_audio(
     config: &Config,
     backend: &CpalBackend,
 ) -> (Arc<MixerControl>, Result<AudioSession, String>) {
-    let control = Arc::new(MixerControl::new());
-    control.master.set_gain_db(INITIAL_MASTER_DB);
+    let control = new_control(config);
 
     let session = choose_devices(backend, config, None, None)
         .and_then(|(input, output)| AudioSession::start(backend, input, output, &control));
@@ -136,6 +167,7 @@ fn report_renderer(cc: &eframe::CreationContext<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ink_core::MixerConfig;
 
     #[test]
     fn glow_is_the_default_renderer() {
@@ -145,6 +177,42 @@ mod tests {
             "Glow"
         };
         assert_eq!(format!("{:?}", renderer()), expected);
+    }
+
+    #[test]
+    fn the_controls_start_with_the_saved_levels_and_a_master_of_at_most_minus_12() {
+        let config_with = |mixer| Config {
+            mixer,
+            ..Config::default()
+        };
+
+        // Nothing saved: the defaults.
+        let control = new_control(&Config::default());
+        assert_eq!(control.mic.gain_db(), 0.0);
+        assert!(!control.mic.is_muted());
+        assert_eq!(control.master.gain_db(), -12.0);
+
+        // Saved levels come back; a loud master starts at -12.
+        let control = new_control(&config_with(MixerConfig::new(5.5, true, 6.0)));
+        assert_eq!(control.mic.gain_db(), 5.5);
+        assert!(control.mic.is_muted());
+        assert_eq!(control.master.gain_db(), -12.0);
+
+        // A quieter master is kept.
+        let control = new_control(&config_with(MixerConfig::new(-3.0, false, -20.0)));
+        assert_eq!(control.mic.gain_db(), -3.0);
+        assert_eq!(control.master.gain_db(), -20.0);
+    }
+
+    #[test]
+    fn settings_are_saved_to_a_path_or_disabled_with_a_reason() {
+        let control = MixerControl::new();
+        let saved = make_settings(&Config::default(), Ok(PathBuf::from("c.toml")), &control);
+        assert_eq!(saved.disabled_reason(), None);
+
+        let reason = "設定ファイルを読めないため、設定は保存されません".to_string();
+        let off = make_settings(&Config::default(), Err(reason.clone()), &control);
+        assert_eq!(off.disabled_reason(), Some(reason.as_str()));
     }
 
     #[test]
