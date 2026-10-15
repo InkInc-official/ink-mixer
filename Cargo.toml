@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/ink-core",
     "crates/ink-backend",
+    "crates/ink-media",
     "app/ink-mixer",
 ]
 

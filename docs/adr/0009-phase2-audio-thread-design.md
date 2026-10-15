@@ -70,9 +70,10 @@ ADR-0007 の「音声スレッドへ値以外を送る必要が出たら（Phase
 
 - **symphonia 0.6.1**（MPL-2.0）：WAV / MP3 のデコード。`default-features = false`、`features = ["mp3", "wav", "pcm", "id3v2"]`。`symphonia-*` の各 crate（core / bundle-mp3 / codec-pcm / format-riff / metadata）も MPL-2.0。**改変せず依存として使う**（AGENTS.md §4 の 9）
   - 既定の features には `mp3` が入っていない。ogg・flac・vorbis・mkv などは使わないので入れない
-  - 0.6 系は新しい。公式のドキュメントにも「API は変わりうる」とあるので、バージョンを固定して使う
-- **rubato 5.0.1**（MIT OR Apache-2.0）：サンプルレートの変換。既定の `fft_resampler`。バッファの受け渡しに `audioadapter-buffers`（MIT OR Apache-2.0）も直接使う
-- 依存の全部（試作の依存木：33 の package）：6 つが MPL-2.0（symphonia の上の 6 つ）、そのほかは MIT / Apache-2.0 / Zlib / 0BSD の組み合わせ。ビルド時だけ使う `unicode-ident` は `(MIT OR Apache-2.0) AND Unicode-3.0`。GPL-3.0 と組み合わせられない種類はない
+  - 0.6 系は新しい。公式のドキュメントにも「API は変わりうる」とあるので、バージョンを固定して使う（`ink-media/Cargo.toml` は `=0.6.1`）
+  - **新しい版に上げるときは、まず読み飛ばしのテストを確かめる。** `reader.rs` と `decode.rs` のテストは、`tone-44k-stereo-id3.mp3` のバイト位置 1367〜1370 を壊して「1 パケットが読み飛ばされる」ことを確かめている。どのパケットが読み飛ばされるかは版によって変わりうる
+- **rubato 5.0.1**（MIT OR Apache-2.0）：サンプルレートの変換。既定の `fft_resampler`。バッファの受け渡しに使う `audioadapter-buffers`（MIT OR Apache-2.0）は、rubato が再エクスポートしている（`rubato::audioadapter_buffers`）ので、直接の依存にはしない
+- 依存の全部（試作の依存木：33 の package）：6 つが MPL-2.0（symphonia の上の 6 つ）、そのほかは MIT / Apache-2.0 / Zlib / 0BSD の組み合わせ。ビルド時だけ使う `unicode-ident` は `(MIT OR Apache-2.0) AND Unicode-3.0`。GPL-3.0 と組み合わせられない種類はない。なお、**このリポジトリで新しく増える package は 22**（`Cargo.lock` が 373 から 396 になるうち、`ink-media` 自身を除く第三者のもの。`syn` などの残りは、すでにある）
 - MPL-2.0 は、一般に GPL-3.0 と組み合わせられる（MPL-2.0 の Secondary License の条項）。配布するときは、MPL のファイルの通知と、ソースの入手方法を示す（Phase 2 の `cargo-about`、#66）。この ADR の判断は一般的な考え方に基づくもので、法的な助言ではない
 - 採らない crate：`minimp3`（C のコードを含む）、`notify`（rc 版。フォルダの反映は更新ボタンで足りる）、`hound`（本体では不要。symphonia が WAV も読む）
 
@@ -175,6 +176,7 @@ Option 1（SE は全部デコード、BGM はストリーミング、コマン�
 - **ループの既知の制限：** MP3 は、gapless 情報の無いファイルで、つなぎ目に十数 ms の隙間が出る。ループさせたい曲は WAV を推奨する。ARCHITECTURE.md §10、F の UI、H の README に書く
 - **SE の読み込み中は鳴らせない：** セッションの作り直しのとき、SE をファイルから読み直す間は、その SE を鳴らせない。SE が多いときの時間は、E・F の実機で確かめる
 - **新しい crate `ink-media`：** 依存は `ink-media → ink-core`。symphonia（MPL-2.0）が入るので、配布するときのライセンス表記が必要（Phase 2 の `cargo-about`、#66）
+- **`load_sound` の一時的なメモリのピーク：** デコード結果、リサンプルの入力と出力、作業用のバッファが同時にあるので、ピークは最終的なサイズの約 3.3 倍になる（60 秒の SE で、最終 22 MB のところ 約 70 MB）。ワーカー側の処理で問題ないが、SE の合計上限（256 MB）を管理する D では、読み込み中のピークも考えに入れる。レートが 48000 と公約数が小さい音源（44101 Hz、22051 Hz など）でも、60 秒で 約 0.2 秒、ピーク 約 70 MB で、特別な対策は要らなかった（試作の実測）
 - **symphonia 0.6 系は新しい：** API が変わりうるので、バージョンを固定し、更新は ADR か Issue で確かめる
 - **MP3 の gapless 情報が無い場合の隙間は、補正しない：** 補正（先頭の無音を自分で取り除く）は、Phase 2 では入れない
 - **Windows：** この ADR の測定は Linux（創作PC）。デコードとリサンプルは純粋な Rust なので、CI のビルドとテストで確かめ、実機の確認は #33 に追記する

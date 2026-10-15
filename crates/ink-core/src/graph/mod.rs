@@ -25,6 +25,7 @@ mod link;
 mod meter;
 mod mic_graph;
 mod mixer;
+mod sound;
 
 pub use buffer::AudioBuffer;
 pub use control::{ChannelControl, MixerControl};
@@ -39,6 +40,7 @@ pub use link::{
 pub use meter::PeakMeter;
 pub use mic_graph::{MicGraph, write_interleaved};
 pub use mixer::MixerNode;
+pub use sound::SoundData;
 
 /// A processing step that transforms one buffer in place.
 ///
