@@ -411,6 +411,14 @@ asset_id = "..."
 
 外部のサービスから音を取り込む機能（ストリーミング再生など）は作らない（2.1）。
 
+### Loopのつなぎ目（既知の制限）
+
+Loopは、ファイルの末尾で先頭へ戻して続ける（ADR-0009）。
+
+-   WAVは、つなぎ目に隙間が出ない
+-   MP3は、エンコーダーのgapless情報（LAME / Xingタグ）があれば隙間が出ない。無いと、十数msの隙間が出ることがある（試作の実測: 13〜20 ms）
+-   **ループさせたい曲はWAVを推奨する**（UIの説明とREADMEにも書く）
+
 ## Sound Pad
 
 -   SEを複数登録（フォルダのSEを一覧で表示し、各SEにトリガーワードを書ける）
@@ -968,7 +976,7 @@ Audio callback / realtime processing pathでは原則禁止:
 -   preallocated buffer
 -   message passing
 
-具体方式は実装時にベンチマークして決定する。
+具体方式は実装時にベンチマークして決定する。決めた方式は、Phase 1がADR-0007、Phase 2（BGM・SE）がADR-0009を参照する。
 
 ------------------------------------------------------------------------
 
@@ -1111,6 +1119,7 @@ ink-mixer/
 │  ├─ ink-assets/
 │  ├─ ink-dsp/
 │  ├─ ink-backend/
+│  ├─ ink-media/            # 音源のデコード・リサンプル（ADR-0009）
 │  ├─ ink-plugin-api/
 │  └─ ink-plugin-lv2/       # 後期追加
 │
@@ -1508,7 +1517,7 @@ AIエージェントはこれらを「決定済み」と扱わないこと。
 
 決定時にはADR（Architecture Decision Record）を残す。
 
-決定済みの事項は `docs/adr/` と AGENTS.md §6 を参照する（音声I/Oライブラリ: ADR-0002、GUI framework: ADR-0004、Audio Graph と値の受け渡し: ADR-0007、外部サービスとの関係: ADR-0008）。
+決定済みの事項は `docs/adr/` と AGENTS.md §6 を参照する（音声I/Oライブラリ: ADR-0002、GUI framework: ADR-0004、Audio Graph と値の受け渡し: ADR-0007、外部サービスとの関係: ADR-0008、Phase 2の音声スレッドの作りと音源のデコード: ADR-0009）。
 
 ------------------------------------------------------------------------
 
@@ -1523,7 +1532,8 @@ docs/adr/
 ├─ 0005-license.md
 ├─ 0006-japanese-font.md
 ├─ 0007-audio-graph-and-realtime-communication.md
-└─ 0008-external-services.md
+├─ 0008-external-services.md
+└─ 0009-phase2-audio-thread-design.md
 ```
 
 今後の候補（番号は起票時に決める）: LV2 Host library、Plugin process isolation など。
