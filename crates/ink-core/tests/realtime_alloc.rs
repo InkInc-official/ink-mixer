@@ -6,16 +6,25 @@
 //! [`counted`]. Other threads (the test harness, other tests) are not
 //! counted, because the counters and the switch are thread-local.
 //!
+//! A thread can also name one size with [`watch`]: the allocations and frees
+//! of exactly that many bytes are counted on their own. The tests of the
+//! order in which the BGM parts are dropped use it with the size of the ring
+//! buffer, to tell which thread frees it.
+//!
 //! The `unsafe` here is only the `GlobalAlloc` impl, which has to be
 //! `unsafe`; it forwards every call to the system allocator.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use ink_core::graph::{
-    AudioBuffer, LinkWriter, MicGraph, MicrophoneSource, MixerControl, SeController, SePolicy,
-    SoundData, audio_link, se_channel,
+    AudioBuffer, BGM_WRITE_CHUNK_FRAMES, BgmController, BgmFeeder, BgmPlayer, FlushPoll,
+    LinkWriter, MicGraph, MicrophoneSource, MixerControl, SeController, SePolicy, SoundData,
+    audio_link, bgm_channel, bgm_ring_frames, se_channel,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,24 +32,38 @@ struct Counts {
     allocs: usize,
     deallocs: usize,
     reallocs: usize,
+    /// Allocations of exactly the size given to [`watch`] (also in `allocs`).
+    watched_allocs: usize,
+    /// Frees of exactly the size given to [`watch`] (also in `deallocs`).
+    watched_deallocs: usize,
 }
 
 thread_local! {
     // `const` initializers: no lazy setup, so the allocator can use them
     // without allocating.
     static ARMED: Cell<bool> = const { Cell::new(false) };
-    static COUNTS: Cell<Counts> = const { Cell::new(Counts { allocs: 0, deallocs: 0, reallocs: 0 }) };
+    static COUNTS: Cell<Counts> = const { Cell::new(Counts {
+        allocs: 0,
+        deallocs: 0,
+        reallocs: 0,
+        watched_allocs: 0,
+        watched_deallocs: 0,
+    }) };
+    /// The size in bytes that is counted on its own; 0 for none.
+    static WATCH: Cell<usize> = const { Cell::new(0) };
 }
 
 struct CountingAllocator;
 
-fn note(update: impl FnOnce(&mut Counts)) {
+/// `update` is given the counts and the watched size.
+fn note(update: impl FnOnce(&mut Counts, usize)) {
     // `try_with`: the thread-locals may be gone while a thread exits.
     let _ = ARMED.try_with(|armed| {
         if armed.get() {
+            let watched = WATCH.try_with(Cell::get).unwrap_or(0);
             let _ = COUNTS.try_with(|counts| {
                 let mut value = counts.get();
-                update(&mut value);
+                update(&mut value, watched);
                 counts.set(value);
             });
         }
@@ -49,22 +72,37 @@ fn note(update: impl FnOnce(&mut Counts)) {
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        note(|counts| counts.allocs += 1);
+        note(|counts, watched| {
+            counts.allocs += 1;
+            if layout.size() == watched {
+                counts.watched_allocs += 1;
+            }
+        });
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        note(|counts| counts.allocs += 1);
+        note(|counts, watched| {
+            counts.allocs += 1;
+            if layout.size() == watched {
+                counts.watched_allocs += 1;
+            }
+        });
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        note(|counts| counts.deallocs += 1);
+        note(|counts, watched| {
+            counts.deallocs += 1;
+            if layout.size() == watched {
+                counts.watched_deallocs += 1;
+            }
+        });
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        note(|counts| counts.reallocs += 1);
+        note(|counts, _| counts.reallocs += 1);
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
@@ -84,6 +122,12 @@ fn counted<R>(f: impl FnOnce() -> R) -> R {
 /// Returns the counts so far and starts again from 0.
 fn take() -> Counts {
     COUNTS.replace(Counts::default())
+}
+
+/// Makes this thread count the allocations and frees of exactly `bytes`
+/// bytes on their own (`watched_allocs`, `watched_deallocs`).
+fn watch(bytes: usize) {
+    WATCH.set(bytes);
 }
 
 const RATE: u32 = 48_000;
@@ -289,4 +333,419 @@ fn the_last_reference_is_dropped_on_the_control_side() {
     // The `Arc` itself and the two channels of the sound.
     assert_eq!(counts.deallocs, 3);
     assert_eq!(se.outstanding(), 0);
+}
+
+// --- The background music (BGM) ---
+
+/// A stand-in for the worker thread of the app: it writes a sine into the
+/// ring buffer and follows the flush protocol, like the real one. It is not
+/// counted (only the thread that renders is).
+struct Worker {
+    /// While true, the worker writes nothing (so the ring buffer runs dry).
+    stall: Arc<AtomicBool>,
+    /// The length of the song in frames; 0 for a song without an end. After
+    /// that many frames, the worker marks the end.
+    song_frames: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<BgmFeeder>>,
+}
+
+impl Worker {
+    fn start(mut feeder: BgmFeeder) -> Self {
+        let stall = Arc::new(AtomicBool::new(false));
+        let song_frames = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = {
+            let (stall, song_frames, stop) = (
+                Arc::clone(&stall),
+                Arc::clone(&song_frames),
+                Arc::clone(&stop),
+            );
+            thread::spawn(move || {
+                let mut left = vec![0.0_f32; BGM_WRITE_CHUNK_FRAMES];
+                let mut right = vec![0.0_f32; BGM_WRITE_CHUNK_FRAMES];
+                let mut written = 0_usize;
+                let mut end_marked = false;
+                feeder.begin_stream(None);
+                while !stop.load(Ordering::Relaxed) {
+                    match feeder.poll_flush() {
+                        FlushPoll::Waiting => {
+                            thread::sleep(Duration::from_micros(50));
+                            continue;
+                        }
+                        FlushPoll::Done => {
+                            written = 0;
+                            end_marked = false;
+                            feeder.begin_stream(None);
+                        }
+                        FlushPoll::Idle => {}
+                    }
+                    if stall.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_micros(200));
+                        continue;
+                    }
+                    let limit = song_frames.load(Ordering::Relaxed);
+                    if limit > 0 && written >= limit {
+                        if !end_marked {
+                            feeder.mark_eof();
+                            end_marked = true;
+                        }
+                        thread::sleep(Duration::from_micros(200));
+                        continue;
+                    }
+                    let mut count = feeder.free_frames().min(BGM_WRITE_CHUNK_FRAMES);
+                    if limit > 0 {
+                        count = count.min(limit - written);
+                    }
+                    if count == 0 {
+                        thread::sleep(Duration::from_micros(100));
+                        continue;
+                    }
+                    for i in 0..count {
+                        let phase = (written + i) as f32 * 440.0 * std::f32::consts::TAU / 48_000.0;
+                        left[i] = 0.1 * phase.sin();
+                        right[i] = -left[i];
+                    }
+                    written += feeder.write(&left[..count], &right[..count]);
+                }
+                feeder
+            })
+        };
+        Self {
+            stall,
+            song_frames,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stops the worker and gives the writing end back.
+    fn finish(mut self) -> BgmFeeder {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle.take().unwrap().join().unwrap()
+    }
+}
+
+/// The graph with the MIC, the BGM, and the SE, and what drives them.
+struct Full {
+    graph: MicGraph,
+    control: Arc<MixerControl>,
+    bgm: BgmController,
+    se: SeController,
+    worker: Worker,
+    out: Vec<f32>,
+}
+
+fn full_graph() -> Full {
+    let (_writer, reader, _) = audio_link(RATE, MAX_FRAMES);
+    let control = Arc::new(MixerControl::new());
+    let (bgm, feeder, bgm_player) = bgm_channel(RATE, MAX_FRAMES);
+    let (se, se_player) = se_channel(RATE, MAX_FRAMES);
+    let graph = MicGraph::new(
+        MicrophoneSource::new(reader),
+        Arc::clone(&control),
+        RATE,
+        MAX_FRAMES,
+    )
+    .with_bgm(bgm_player)
+    .with_se(se_player);
+    Full {
+        graph,
+        control,
+        bgm,
+        se,
+        worker: Worker::start(feeder),
+        out: vec![0.0; BIGGEST_BLOCK * 2],
+    }
+}
+
+impl Full {
+    /// Renders one block. This is the only thing that is counted.
+    fn render(&mut self, frames: usize) {
+        let out = &mut self.out[..frames * 2];
+        let graph = &mut self.graph;
+        counted(|| graph.render(out, 2));
+    }
+
+    /// Renders blocks of 256 frames until `done`. The worker has to be given
+    /// time, so there is a short wait after every block.
+    fn render_until(&mut self, what: &str, mut done: impl FnMut(&Full) -> bool) {
+        let started = Instant::now();
+        while !done(self) {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "timed out: {what}"
+            );
+            self.render(MAX_FRAMES);
+            thread::sleep(Duration::from_micros(300));
+        }
+    }
+}
+
+/// Every path of the BGM and the SE, one after the other, then a random
+/// mix. Rendering allocates nothing and frees nothing.
+#[test]
+fn rendering_the_bgm_and_the_se_does_not_allocate_or_free_on_any_path() {
+    let mut full = full_graph();
+    take();
+
+    // The first start: priming, then a fade in, then playing.
+    full.bgm.play();
+    full.render_until("the first start", |f| f.bgm.stats().played_frames >= 20_000);
+    assert_eq!(take(), Counts::default(), "a normal play");
+
+    // Pause: the fade out, then nothing is read.
+    full.bgm.pause();
+    for _ in 0..4 {
+        full.render(MAX_FRAMES);
+    }
+    let paused_at = full.bgm.stats().played_frames;
+    for _ in 0..10 {
+        full.render(MAX_FRAMES);
+    }
+    assert_eq!(full.bgm.stats().played_frames, paused_at, "paused");
+    full.bgm.play();
+    full.render_until("play after pause", |f| {
+        f.bgm.stats().played_frames >= paused_at + 5_000
+    });
+    assert_eq!(take(), Counts::default(), "pause and play");
+
+    // The ring buffer runs dry: the fade out for an underrun, the silence,
+    // priming, and the fade in.
+    full.worker.stall.store(true, Ordering::Relaxed);
+    full.render_until("the ring buffer runs dry", |f| f.bgm.stats().underruns >= 1);
+    for _ in 0..5 {
+        full.render(MAX_FRAMES);
+    }
+    let dry = full.bgm.stats();
+    assert!(dry.underrun_frames > 0, "{dry:?}");
+    full.worker.stall.store(false, Ordering::Relaxed);
+    let resumed_from = dry.played_frames;
+    full.render_until("play after the underrun", |f| {
+        f.bgm.stats().played_frames >= resumed_from + 5_000
+    });
+    assert_eq!(take(), Counts::default(), "an underrun and priming");
+
+    // Stop: the fade out, the wait for the worker, and the ring buffer is
+    // thrown away.
+    full.bgm.request_flush();
+    full.render_until("the flush", |f| f.bgm.is_flushed());
+    assert_eq!(full.bgm.stats().played_frames, 0);
+    full.bgm.play();
+    full.render_until("play after stop", |f| f.bgm.stats().played_frames >= 5_000);
+    assert_eq!(take(), Counts::default(), "stop and play again");
+
+    // The end of a song that does not loop.
+    full.worker.song_frames.store(20_000, Ordering::Relaxed);
+    full.bgm.request_flush();
+    full.render_until("the flush before the short song", |f| f.bgm.is_flushed());
+    full.bgm.play();
+    full.render_until("the end of the song", |f| f.bgm.is_finished());
+    assert_eq!(full.bgm.stats().played_frames, 20_000);
+    for _ in 0..3 {
+        full.render(MAX_FRAMES);
+    }
+    assert_eq!(take(), Counts::default(), "the end of a song");
+    // A stop after the end brings the song back to the start.
+    full.bgm.request_flush();
+    full.render_until("the flush after the end", |f| f.bgm.is_flushed());
+    assert!(!full.bgm.is_finished());
+    full.worker.song_frames.store(0, Ordering::Relaxed);
+    assert_eq!(take(), Counts::default(), "stop after the end");
+
+    // A random mix of everything, with the SE.
+    let mut rng = Rng(2026);
+    full.bgm.play();
+    for round in 0..1500 {
+        for _ in 0..rng.below(4) {
+            match rng.below(14) {
+                0 => full.bgm.play(),
+                1 => full.bgm.pause(),
+                2 => {
+                    full.bgm.request_flush();
+                    full.bgm.play();
+                }
+                3 => full
+                    .worker
+                    .stall
+                    .store(rng.below(2) == 0, Ordering::Relaxed),
+                4 => full
+                    .worker
+                    .song_frames
+                    .store(rng.below(3) as usize * 15_000, Ordering::Relaxed),
+                5 => full.control.bgm.set_gain_db(rng.below(40) as f32 - 30.0),
+                6 => full.control.bgm.set_muted(rng.below(2) == 0),
+                7 => {
+                    let slot = rng.below(10) as usize;
+                    let _ = full.se.play(slot, 1.0, SePolicy::Overlap);
+                }
+                8 => {
+                    let slot = rng.below(10) as usize;
+                    full.se.set_sound(slot, sound(&mut rng)).unwrap();
+                }
+                9 => {
+                    let _ = full.se.stop_all();
+                }
+                10 => {
+                    full.se.collect();
+                }
+                11 => full.control.se.set_muted(rng.below(2) == 0),
+                _ => full.control.master.set_gain_db(rng.below(30) as f32 - 24.0),
+            }
+        }
+        let frames = 1 + rng.below(BIGGEST_BLOCK as u64) as usize;
+        full.render(frames);
+        if round % 4 == 0 {
+            thread::sleep(Duration::from_micros(200));
+        }
+    }
+    assert_eq!(take(), Counts::default(), "the random mix");
+    full.worker.stall.store(false, Ordering::Relaxed);
+    full.worker.song_frames.store(0, Ordering::Relaxed);
+    assert_eq!(full.se.stats().leaked, 0);
+    let Full { worker, .. } = full;
+    drop(worker.finish());
+}
+
+/// The fade of a Pause that is interrupted by Play while only a little is
+/// left in the ring buffer is cut, and the next fade starts from 0 again.
+/// The worker is replaced by the test, which writes exact amounts.
+#[test]
+fn a_cut_fade_does_not_allocate_or_free() {
+    let (_writer, reader, _) = audio_link(RATE, MAX_FRAMES);
+    let control = Arc::new(MixerControl::new());
+    let (bgm, mut feeder, player) = bgm_channel(RATE, MAX_FRAMES);
+    let mut graph = MicGraph::new(
+        MicrophoneSource::new(reader),
+        Arc::clone(&control),
+        RATE,
+        MAX_FRAMES,
+    )
+    .with_bgm(player);
+    let mut out = vec![0.0_f32; MAX_FRAMES * 2];
+    let mut render = |graph: &mut MicGraph| {
+        counted(|| graph.render(&mut out, 2));
+    };
+
+    // A block is 256 frames and a fade 480: playing needs 736 at the start of
+    // a block. 5600 frames are 4800 (priming) and then 19 blocks and 736 over.
+    let total = 5_600;
+    let sine: Vec<f32> = (0..total).map(|i| 0.1 * (i as f32 * 0.05).sin()).collect();
+    let negative: Vec<f32> = sine.iter().map(|s| -s).collect();
+    assert_eq!(feeder.write(&sine, &negative), total);
+    bgm.play();
+    take();
+
+    for _ in 0..20 {
+        render(&mut graph);
+    }
+    // The 20th block started with exactly one block and one fade.
+    assert_eq!(bgm.stats().fill_frames, 736);
+    assert_eq!(bgm.stats().underruns, 0);
+
+    // Pause: the fade reads one block of its 480 frames.
+    bgm.pause();
+    render(&mut graph);
+    // Play: it plays again, finds 224 frames, and fades out for an underrun
+    // that needs 480: the fade is cut.
+    assert_eq!(bgm.stats().fill_frames, 480);
+    bgm.play();
+    render(&mut graph);
+    let stats = bgm.stats();
+    assert_eq!(stats.underruns, 1);
+    assert_eq!(stats.played_frames, total as u64, "every frame was read");
+
+    // The next start: priming, then a fade in from 0.
+    assert_eq!(feeder.write(&sine, &negative), total);
+    for _ in 0..4 {
+        render(&mut graph);
+    }
+    assert_eq!(bgm.stats().played_frames, total as u64 + 1024);
+    assert_eq!(take(), Counts::default(), "a cut fade");
+}
+
+/// The ring buffer is freed by the last of the parts that hold it. These
+/// tests count the frees of its size, in bytes, on the thread that drops the
+/// player (the audio backend does it on its own thread) and on the others.
+const ODD_RATE: u32 = 47_999;
+const RING_BYTES: usize = 47_999 * 2 * size_of::<f32>();
+
+fn ring_parts() -> (BgmController, BgmFeeder, BgmPlayer) {
+    // A rate that nothing else uses, so that only the ring buffer has this
+    // size.
+    assert_eq!(
+        bgm_ring_frames(ODD_RATE, MAX_FRAMES) * 2 * size_of::<f32>(),
+        RING_BYTES
+    );
+    watch(RING_BYTES);
+    take();
+    let parts = counted(|| bgm_channel(ODD_RATE, MAX_FRAMES));
+    let made = take();
+    assert_eq!(
+        made.watched_allocs, 1,
+        "the ring buffer is one block of memory"
+    );
+    parts
+}
+
+/// Drops `value` on a new thread and returns what that thread counted.
+fn drop_on_a_new_thread<T: Send + 'static>(value: T) -> Counts {
+    thread::spawn(move || {
+        watch(RING_BYTES);
+        take();
+        counted(|| drop(value));
+        take()
+    })
+    .join()
+    .unwrap()
+}
+
+/// Drops `value` on this thread and returns what was counted.
+fn drop_here<T>(value: T) -> Counts {
+    take();
+    counted(|| drop(value));
+    take()
+}
+
+#[test]
+fn when_the_controller_lives_longer_the_control_side_frees_the_ring_buffer() {
+    let (controller, feeder, player) = ring_parts();
+
+    // The stream is closed: the player is dropped on the thread of the
+    // audio backend. The ring buffer is not freed there.
+    let on_the_audio_thread = drop_on_a_new_thread(player);
+    assert_eq!(on_the_audio_thread.watched_deallocs, 0);
+
+    // The worker ends. The ring buffer is not freed yet either: the keeper
+    // of the controller holds the reading end.
+    let worker_end = drop_here(feeder);
+    assert_eq!(worker_end.watched_deallocs, 0);
+
+    // The controller is dropped on the control side: it frees the ring
+    // buffer, once.
+    let control_side = drop_here(controller);
+    assert_eq!(control_side.watched_deallocs, 1);
+}
+
+#[test]
+fn when_the_worker_ends_last_the_worker_frees_the_ring_buffer() {
+    let (controller, feeder, player) = ring_parts();
+    assert_eq!(drop_on_a_new_thread(player).watched_deallocs, 0);
+    assert_eq!(drop_here(controller).watched_deallocs, 0);
+    // The writing end is the last one that holds the ring buffer.
+    let worker_thread = drop_on_a_new_thread(feeder);
+    assert_eq!(worker_thread.watched_deallocs, 1);
+}
+
+/// A LIMIT, not a wish: if the controller is dropped before the player, the
+/// last reference to the ring buffer is the player's, and the thread that
+/// drops the player frees it (once, when the stream is closed; never while
+/// it plays). The session drops the parts in the order of the first test.
+#[test]
+fn limit_when_the_controller_is_dropped_first_the_audio_thread_frees_the_ring_buffer() {
+    let (controller, feeder, player) = ring_parts();
+    assert_eq!(drop_here(controller).watched_deallocs, 0);
+    assert_eq!(drop_here(feeder).watched_deallocs, 0);
+    let on_the_audio_thread = drop_on_a_new_thread(player);
+    assert_eq!(on_the_audio_thread.watched_deallocs, 1, "the known limit");
 }

@@ -17,6 +17,9 @@ pub const MASTER_VOLUME_RANGE: DbRange = DbRange::new(SILENCE_DB, 6.0);
 /// The range of the volume of the sound effects (SE) channel.
 pub const SE_VOLUME_RANGE: DbRange = DbRange::new(SILENCE_DB, 6.0);
 
+/// The range of the volume of the background music (BGM) channel.
+pub const BGM_VOLUME_RANGE: DbRange = DbRange::new(SILENCE_DB, 6.0);
+
 /// A closed range of gains in dB.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DbRange {
@@ -146,6 +149,16 @@ mod tests {
         assert_eq!(SE_VOLUME_RANGE.clamp(12.0), 6.0);
         assert_eq!(SE_VOLUME_RANGE.clamp(-100.0), SILENCE_DB);
         assert_eq!(SE_VOLUME_RANGE.clamp(f32::NAN), SILENCE_DB);
+    }
+
+    #[test]
+    fn the_bgm_volume_goes_from_silence_to_plus_6_db() {
+        assert_eq!(BGM_VOLUME_RANGE.min, SILENCE_DB);
+        assert_eq!(BGM_VOLUME_RANGE.max, 6.0);
+        assert_eq!(BGM_VOLUME_RANGE.clamp(0.0), 0.0);
+        assert_eq!(BGM_VOLUME_RANGE.clamp(12.0), 6.0);
+        assert_eq!(BGM_VOLUME_RANGE.clamp(-100.0), SILENCE_DB);
+        assert_eq!(BGM_VOLUME_RANGE.clamp(f32::NAN), SILENCE_DB);
     }
 
     #[test]

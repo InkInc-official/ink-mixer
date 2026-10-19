@@ -26,6 +26,8 @@ mod decode;
 mod error;
 mod reader;
 mod resample;
+mod stream;
+mod stream_resample;
 #[cfg(test)]
 mod test_util;
 
@@ -33,3 +35,4 @@ pub use decode::{Decoded, decode_file};
 pub use error::MediaError;
 pub use reader::{SoundFormat, SoundInfo, SoundReader, probe};
 pub use resample::{load_sound, resample};
+pub use stream::{Chunk, SoundStream};

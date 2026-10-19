@@ -13,7 +13,7 @@ use crate::{Decoded, MediaError, decode_file};
 /// The number of input frames the resampler takes at a time. Measured with
 /// the throwaway prototype of ADR-0009: a 5 minute sound takes about 0.4
 /// seconds.
-const CHUNK_FRAMES: usize = 1_024;
+pub(crate) const CHUNK_FRAMES: usize = 1_024;
 
 /// The most frames a resampled sound may have (about 256 MiB for each
 /// channel). A sound effect is at most a minute long, so this is far above
@@ -89,7 +89,7 @@ pub fn resample(sound: &SoundData, sample_rate: u32) -> Result<SoundData, MediaE
 
 /// Returns how many frames `frames` frames at `from` Hz are at `to` Hz,
 /// rounded to the nearest whole number.
-fn frames_at(frames: usize, from: u32, to: u32) -> usize {
+pub(crate) fn frames_at(frames: usize, from: u32, to: u32) -> usize {
     let from = u128::from(from);
     let wanted = (frames as u128 * u128::from(to) + from / 2) / from;
     usize::try_from(wanted).unwrap_or(usize::MAX)

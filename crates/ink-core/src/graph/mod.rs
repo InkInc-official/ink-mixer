@@ -17,6 +17,8 @@
 //! device buffer, written by [`write_interleaved`]. Add `AudioSink` when a
 //! second destination (a monitor, a recorder, ...) arrives.
 
+mod bgm;
+mod bgm_player;
 mod buffer;
 mod control;
 mod gain;
@@ -30,12 +32,17 @@ mod se_control;
 mod se_player;
 mod sound;
 
+pub use bgm::{
+    BGM_FADE_MS, BGM_PRIME_MS, BGM_RING_MS, BGM_WRITE_CHUNK_FRAMES, BgmController, BgmFeeder,
+    BgmStats, FlushPoll, bgm_fade_frames, bgm_prime_frames, bgm_ring_frames,
+};
+pub use bgm_player::{BgmPlayer, BgmPlayerState, bgm_channel};
 pub use buffer::AudioBuffer;
 pub use control::{ChannelControl, MixerControl};
 pub use gain::GainNode;
 pub use level::{
-    DbRange, MASTER_VOLUME_RANGE, MIC_GAIN_RANGE, SE_VOLUME_RANGE, SILENCE_DB, block_peak,
-    db_to_gain, gain_to_db,
+    BGM_VOLUME_RANGE, DbRange, MASTER_VOLUME_RANGE, MIC_GAIN_RANGE, SE_VOLUME_RANGE, SILENCE_DB,
+    block_peak, db_to_gain, gain_to_db,
 };
 pub use link::{
     LinkReader, LinkStats, LinkWriter, MIN_CAPACITY, MIN_TARGET, MicrophoneSource, audio_link,

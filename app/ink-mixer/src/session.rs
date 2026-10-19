@@ -1,16 +1,19 @@
 //! An audio session: the input and output streams that play
-//! MIC (+ SE) -> Gain -> MASTER -> output (ADR-0007, ADR-0009). Used by
-//! `ink-mixer run` and by the window.
+//! MIC (+ BGM) (+ SE) -> Gain -> MASTER -> output (ADR-0007, ADR-0009). Used
+//! by `ink-mixer run` and by the window.
 //!
 //! The output is opened first, then the input, and the two are connected
 //! with a ring buffer (`audio_link`). The output callback runs a `MicGraph`
 //! that has the sound effects (SE) channel; the session keeps the
-//! [`SeController`] for it.
+//! [`SeController`] for it. With [`SessionOptions::bgm`], the graph also has
+//! the background music (BGM) channel, and the session keeps a [`Bgm`] (the
+//! controller and the worker thread that fills its ring buffer).
 //! The sample rate and channel counts are chosen by actually opening the
 //! devices, because the numbers in `DeviceInfo` cannot be trusted (ALSA
 //! `sysdefault` reports that it supports everything).
 
 use std::fmt;
+use std::io;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,10 +23,12 @@ use ink_backend::{
 };
 use ink_core::Config;
 use ink_core::graph::{
-    LinkStats, LinkWriter, MicGraph, MicrophoneSource, MixerControl, SeController, audio_link,
-    se_channel,
+    BgmController, BgmFeeder, LinkStats, LinkWriter, MicGraph, MicrophoneSource, MixerControl,
+    SeController, audio_link, bgm_channel, se_channel,
 };
 use tracing::{debug, warn};
+
+use crate::bgm_worker::Bgm;
 
 /// A stream without a callback for this long is considered stopped.
 const STALL: Duration = Duration::from_secs(1);
@@ -114,16 +119,38 @@ impl From<SessionError> for String {
     }
 }
 
+/// What a session is made of besides the MIC and the sound effects.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionOptions {
+    /// Add the background music (BGM) channel and its worker thread. Without
+    /// it nothing of the BGM is made: no ring buffer, no player, no thread.
+    pub bgm: bool,
+}
+
 /// Open input and output streams playing the MIC through the mixer.
 ///
-/// Dropping it stops both streams. The fields drop in order, so the input
-/// stops first and nothing writes to the ring buffer while the output stops.
-/// The SE controller drops after the output stream, so the player (in the
-/// output callback) is gone before the queues it shares are released.
+/// Dropping it stops both streams. The fields drop in the order they are
+/// declared, and the order matters:
+///
+/// 1. `input` stops first, so nothing writes to the ring buffer while the
+///    output stops.
+/// 2. `output` stops; the graph in its callback, with the SE player and the
+///    BGM player, is dropped. The BGM player hands the reading end of its
+///    ring buffer to the controller (it frees nothing).
+/// 3. `se` drops after the output stream, so the SE player is gone before
+///    the queues it shares are released.
+/// 4. `bgm` drops after the output stream, for the same reason: its worker
+///    thread is joined first, and then its controller is dropped, which
+///    frees the ring buffer on the control side, never on the audio thread.
+/// 5. `stats` and the rest hold nothing that the streams use.
+///
+/// Do not reorder the fields without reading `ink-core/tests/realtime_alloc.rs`
+/// (the tests of the drop orders).
 pub struct AudioSession {
     input: InputStream,
     output: OutputStream,
     se: SeController,
+    bgm: Option<Bgm>,
     stats: Arc<LinkStats>,
     input_device: DeviceInfo,
     output_device: DeviceInfo,
@@ -133,12 +160,30 @@ pub struct AudioSession {
 
 impl AudioSession {
     /// Opens `input` and `output`, trying the candidate configurations in
-    /// order, and starts playing through a graph that follows `control`.
+    /// order, and starts playing through a graph that follows `control`. The
+    /// session has no BGM (see [`start_with`](Self::start_with)).
     pub fn start(
         backend: &dyn AudioBackend,
         input: DeviceInfo,
         output: DeviceInfo,
         control: &Arc<MixerControl>,
+    ) -> Result<Self, String> {
+        Self::start_with(backend, input, output, control, SessionOptions::default())
+    }
+
+    /// [`start`](Self::start) with `options`.
+    ///
+    /// # Errors
+    ///
+    /// Besides the errors of `start`, fails if the BGM worker thread cannot
+    /// be started. It is started before the streams are opened, so nothing
+    /// is playing when it fails.
+    pub fn start_with(
+        backend: &dyn AudioBackend,
+        input: DeviceInfo,
+        output: DeviceInfo,
+        control: &Arc<MixerControl>,
+        options: SessionOptions,
     ) -> Result<Self, String> {
         let rates = rate_candidates(&input.sample_rates, &output.sample_rates);
         if rates.is_empty() {
@@ -155,18 +200,26 @@ impl AudioSession {
             'output: for &out_ch in &out_channels {
                 for &in_ch in &in_channels {
                     debug!("trying {rate} Hz, input {in_ch} ch, output {out_ch} ch");
-                    match try_open(backend, &input, &output, control, rate, in_ch, out_ch) {
+                    let attempt = Attempt {
+                        rate,
+                        in_channels: in_ch,
+                        out_channels: out_ch,
+                        bgm: options.bgm,
+                    };
+                    match try_open(backend, &input, &output, control, attempt) {
                         Ok(Opened {
                             input: input_stream,
                             output: output_stream,
                             stats,
                             se,
+                            bgm,
                         }) => {
                             let now = Instant::now();
                             return Ok(Self {
                                 input: input_stream,
                                 output: output_stream,
                                 se,
+                                bgm,
                                 stats,
                                 input_device: input,
                                 output_device: output,
@@ -183,6 +236,9 @@ impl AudioSession {
                         }
                         Err((side, OpenError::Failed(e))) => {
                             return Err(format!("failed to open the {side}: {e}"));
+                        }
+                        Err((_, OpenError::BgmWorker(e))) => {
+                            return Err(format!("failed to start the BGM worker: {e}"));
                         }
                     }
                 }
@@ -227,6 +283,14 @@ impl AudioSession {
     /// only (the main thread of the CLI, the UI thread of the GUI).
     pub fn se_mut(&mut self) -> &mut SeController {
         &mut self.se
+    }
+
+    /// Returns the background music (BGM) player, if the session was started
+    /// with [`SessionOptions::bgm`]. Its methods take `&self`, so it can be
+    /// used from the control thread (the main thread of the CLI) without a
+    /// mutable borrow.
+    pub fn bgm(&self) -> Option<&Bgm> {
+        self.bgm.as_ref()
     }
 
     /// Returns the statistics of the ring buffer between the streams.
@@ -313,6 +377,8 @@ enum OpenError {
     Unsupported(BackendError),
     /// Anything else; other candidates would fail too, so give up.
     Failed(BackendError),
+    /// The BGM worker thread could not be started.
+    BgmWorker(io::Error),
 }
 
 impl From<BackendError> for OpenError {
@@ -324,25 +390,48 @@ impl From<BackendError> for OpenError {
     }
 }
 
-/// What [`try_open`] opened.
+/// What [`try_open`] opened. The fields drop in the order of
+/// [`AudioSession`]: the streams first, then the controllers.
 struct Opened {
     input: InputStream,
     output: OutputStream,
-    stats: Arc<LinkStats>,
     se: SeController,
+    bgm: Option<Bgm>,
+    stats: Arc<LinkStats>,
 }
 
-/// The parts of the audio path for `rate`: the writer for the input
-/// callback, the graph for the output callback, the statistics of the ring
-/// buffer, and the control side of the SE player.
-///
-/// The graph and the SE player are made with the same `max_frames`
-/// ([`MAX_FRAMES_PER_CALLBACK`]), because the graph renders the SE player in
-/// parts of at most that many frames.
-fn build_graph(
-    control: &Arc<MixerControl>,
+/// One configuration to try.
+#[derive(Debug, Clone, Copy)]
+struct Attempt {
     rate: u32,
-) -> (LinkWriter, MicGraph, Arc<LinkStats>, SeController) {
+    in_channels: u16,
+    out_channels: u16,
+    /// Whether the graph has the BGM channel.
+    bgm: bool,
+}
+
+/// The parts of the audio path for one rate.
+struct Built {
+    /// For the input callback.
+    writer: LinkWriter,
+    /// For the output callback.
+    graph: MicGraph,
+    /// The statistics of the ring buffer between the streams.
+    stats: Arc<LinkStats>,
+    /// The control side of the SE player.
+    se: SeController,
+    /// The control side and the worker side of the BGM player, if the graph
+    /// has the BGM channel.
+    bgm: Option<(BgmController, BgmFeeder)>,
+}
+
+/// The parts of the audio path for `rate`. With `bgm`, the graph also has
+/// the BGM channel; without it, no BGM part is made at all.
+///
+/// The graph, the SE player and the BGM player are made with the same
+/// `max_frames` ([`MAX_FRAMES_PER_CALLBACK`]), because the graph renders them
+/// in parts of at most that many frames.
+fn build_graph(control: &Arc<MixerControl>, rate: u32, bgm: bool) -> Built {
     let (writer, reader, stats) = audio_link(rate, MAX_FRAMES_PER_CALLBACK);
     let (se, player) = se_channel(rate, MAX_FRAMES_PER_CALLBACK);
     let graph = MicGraph::new(
@@ -352,22 +441,57 @@ fn build_graph(
         MAX_FRAMES_PER_CALLBACK,
     )
     .with_se(player);
-    (writer, graph, stats, se)
+    let (graph, bgm) = if bgm {
+        let (controller, feeder, bgm_player) = bgm_channel(rate, MAX_FRAMES_PER_CALLBACK);
+        (graph.with_bgm(bgm_player), Some((controller, feeder)))
+    } else {
+        (graph, None)
+    };
+    Built {
+        writer,
+        graph,
+        stats,
+        se,
+        bgm,
+    }
 }
 
-/// Opens one configuration: the output first, then the input, so that the
-/// input does not run alone and overflow the ring buffer. On failure, returns
-/// which side could not be opened.
+/// Opens one configuration: the BGM worker (if there is a BGM), then the
+/// output, then the input, so that the input does not run alone and overflow
+/// the ring buffer. On failure, returns which side could not be opened.
+///
+/// The worker thread is started before any stream is opened. The locals drop
+/// in the reverse order of their declaration, so when a stream fails to open
+/// the streams that were opened go first and the BGM controller goes last,
+/// which is the order of [`AudioSession`]. If the thread cannot be started,
+/// no stream exists yet and nothing can be playing.
 fn try_open(
     backend: &dyn AudioBackend,
     input: &DeviceInfo,
     output: &DeviceInfo,
     control: &Arc<MixerControl>,
-    rate: u32,
-    in_channels: u16,
-    out_channels: u16,
+    attempt: Attempt,
 ) -> Result<Opened, (&'static str, OpenError)> {
-    let (mut writer, mut graph, stats, se) = build_graph(control, rate);
+    let Attempt {
+        rate,
+        in_channels,
+        out_channels,
+        bgm,
+    } = attempt;
+    let Built {
+        mut writer,
+        mut graph,
+        stats,
+        se,
+        bgm: bgm_parts,
+    } = build_graph(control, rate, bgm);
+
+    let bgm = match bgm_parts {
+        Some((controller, feeder)) => {
+            Some(Bgm::start(controller, feeder).map_err(|e| ("bgm", OpenError::BgmWorker(e)))?)
+        }
+        None => None,
+    };
 
     let out_config = StreamConfig {
         sample_rate: rate,
@@ -400,8 +524,9 @@ fn try_open(
     Ok(Opened {
         input: input_stream,
         output: output_stream,
-        stats,
         se,
+        bgm,
+        stats,
     })
 }
 
@@ -477,7 +602,7 @@ impl Watch {
 
 #[cfg(test)]
 mod tests {
-    use ink_core::graph::{SePolicy, SoundData};
+    use ink_core::graph::{SePolicy, SoundData, bgm_prime_frames, bgm_ring_frames};
 
     use super::*;
 
@@ -523,7 +648,9 @@ mod tests {
     #[test]
     fn the_graph_plays_the_se_through_the_controller() {
         let control = Arc::new(MixerControl::new());
-        let (_writer, mut graph, _stats, mut se) = build_graph(&control, 48_000);
+        let Built {
+            mut graph, mut se, ..
+        } = build_graph(&control, 48_000, false);
         // More frames than one callback part (MAX_FRAMES_PER_CALLBACK), so
         // the graph splits the block and the SE player is called in parts.
         let frames = MAX_FRAMES_PER_CALLBACK * 2 + 100;
@@ -540,12 +667,199 @@ mod tests {
     #[test]
     fn the_graph_without_a_sound_is_silent() {
         let control = Arc::new(MixerControl::new());
-        let (_writer, mut graph, _stats, se) = build_graph(&control, 44_100);
+        let Built { mut graph, se, .. } = build_graph(&control, 44_100, false);
         let mut out = vec![-1.0_f32; 2 * 480];
         graph.render(&mut out, 2);
         assert!(out.iter().all(|&sample| sample == 0.0));
         assert_eq!(se.sample_rate(), 44_100);
         assert_eq!(se.outstanding(), 0);
+    }
+
+    /// Writes `frames` frames of `value` on both channels, as the worker does.
+    fn feed(feeder: &mut BgmFeeder, value: f32, frames: usize) {
+        let samples = vec![value; frames];
+        assert_eq!(feeder.write(&samples, &samples), frames);
+    }
+
+    #[test]
+    fn a_session_has_no_bgm_unless_asked_for() {
+        assert!(!SessionOptions::default().bgm);
+        assert!(SessionOptions { bgm: true }.bgm);
+    }
+
+    #[test]
+    fn the_graph_without_bgm_makes_no_bgm_part() {
+        let control = Arc::new(MixerControl::new());
+        let built = build_graph(&control, 48_000, false);
+        assert!(built.bgm.is_none());
+        let mut graph = built.graph;
+        let mut out = vec![-1.0_f32; 2 * 480];
+        graph.render(&mut out, 2);
+        assert!(out.iter().all(|&sample| sample == 0.0));
+        assert_eq!(control.bgm.meter().take(), 0.0);
+    }
+
+    #[test]
+    fn the_graph_plays_the_bgm_through_the_controller() {
+        let control = Arc::new(MixerControl::new());
+        let Built { mut graph, bgm, .. } = build_graph(&control, 48_000, true);
+        let (controller, mut feeder) = bgm.expect("the BGM parts");
+        feed(&mut feeder, 0.25, 12_000);
+        controller.play();
+
+        // More frames than one callback part, so the graph splits the block
+        // and the BGM player is called in parts.
+        let frames = MAX_FRAMES_PER_CALLBACK * 2 + 100;
+        let mut out = vec![0.0_f32; frames * 2];
+        graph.render(&mut out, 2);
+
+        // After the priming and the fade-in the song is heard as it is.
+        for frame in out.chunks(2).skip(5_000) {
+            assert!((frame[0] - 0.25).abs() < 1e-6, "{frame:?}");
+            assert!((frame[1] - 0.25).abs() < 1e-6, "{frame:?}");
+        }
+        assert!(control.bgm.meter().take() > 0.24);
+        assert!(controller.stats().played_frames > 0);
+    }
+
+    #[test]
+    fn the_graph_mixes_the_bgm_and_the_se() {
+        let control = Arc::new(MixerControl::new());
+        let Built {
+            mut graph,
+            mut se,
+            bgm,
+            ..
+        } = build_graph(&control, 48_000, true);
+        let (controller, mut feeder) = bgm.expect("the BGM parts");
+        feed(&mut feeder, 0.25, 12_000);
+        controller.play();
+        let frames = MAX_FRAMES_PER_CALLBACK * 2 + 100;
+        let sound = SoundData::new(48_000, vec![0.25; frames + 50], vec![-0.25; frames + 50]);
+        se.set_sound(0, Arc::new(sound)).unwrap();
+        se.play(0, 1.0, SePolicy::Overlap).unwrap();
+
+        let mut out = vec![0.0_f32; frames * 2];
+        graph.render(&mut out, 2);
+
+        // BGM (0.25, 0.25) + SE (0.25, -0.25).
+        for frame in out.chunks(2).skip(5_000) {
+            assert!((frame[0] - 0.5).abs() < 1e-6, "{frame:?}");
+            assert!(frame[1].abs() < 1e-6, "{frame:?}");
+        }
+        assert!(control.bgm.meter().take() > 0.24);
+        assert!(control.se.meter().take() > 0.24);
+    }
+
+    #[test]
+    fn the_bgm_parts_use_the_sample_rate_of_the_graph() {
+        let control = Arc::new(MixerControl::new());
+        let (controller, feeder) = build_graph(&control, 44_100, true).bgm.unwrap();
+        assert_eq!(controller.sample_rate(), 44_100);
+        assert_eq!(feeder.sample_rate(), 44_100);
+        assert_eq!(controller.ring_capacity_frames(), 44_100);
+    }
+
+    #[test]
+    fn the_bgm_ring_buffer_and_priming_for_the_block_size_of_the_product() {
+        // (rate, ring frames, ring bytes, priming frames)
+        let cases = [
+            (44_100_u32, 44_100_usize, 352_800_usize, 4_537_usize),
+            (48_000, 48_000, 384_000, 4_800),
+            (96_000, 96_000, 768_000, 9_600),
+        ];
+        for (rate, ring, bytes, prime) in cases {
+            assert_eq!(bgm_ring_frames(rate, MAX_FRAMES_PER_CALLBACK), ring);
+            assert_eq!(
+                bgm_ring_frames(rate, MAX_FRAMES_PER_CALLBACK) * 2 * size_of::<f32>(),
+                bytes
+            );
+            assert_eq!(bgm_prime_frames(rate, MAX_FRAMES_PER_CALLBACK), prime);
+            // The ring buffer holds the priming and one more block.
+            assert!(ring >= prime + MAX_FRAMES_PER_CALLBACK, "{rate}");
+        }
+    }
+
+    /// A backend whose streams cannot be opened, with the error it gives.
+    struct Refusing(fn() -> BackendError);
+
+    impl AudioBackend for Refusing {
+        fn enumerate_input_devices(&self) -> ink_backend::Result<Vec<DeviceInfo>> {
+            Ok(Vec::new())
+        }
+
+        fn enumerate_output_devices(&self) -> ink_backend::Result<Vec<DeviceInfo>> {
+            Ok(Vec::new())
+        }
+
+        fn default_input(&self) -> ink_backend::Result<Option<DeviceInfo>> {
+            Ok(None)
+        }
+
+        fn default_output(&self) -> ink_backend::Result<Option<DeviceInfo>> {
+            Ok(None)
+        }
+
+        fn open_input(
+            &self,
+            _device: &DeviceId,
+            _config: StreamConfig,
+            _callback: ink_backend::InputCallback,
+        ) -> ink_backend::Result<InputStream> {
+            Err((self.0)())
+        }
+
+        fn open_output(
+            &self,
+            _device: &DeviceId,
+            _config: StreamConfig,
+            _callback: ink_backend::OutputCallback,
+        ) -> ink_backend::Result<OutputStream> {
+            Err((self.0)())
+        }
+    }
+
+    #[test]
+    fn a_session_that_cannot_open_drops_the_bgm_parts_cleanly() {
+        let device = |id: &str| DeviceInfo {
+            id: DeviceId::new(id),
+            name: id.to_string(),
+            channels: 2,
+            sample_rates: vec![48_000, 44_100],
+        };
+        let control = Arc::new(MixerControl::new());
+        type MakeError = fn() -> BackendError;
+        let cases: [(MakeError, &str); 2] = [
+            // Every configuration is tried: a worker is started and dropped
+            // for each of them.
+            (
+                || BackendError::UnsupportedConfig("fake".to_string()),
+                "no working configuration found",
+            ),
+            (
+                || BackendError::Other("fake".to_string()),
+                "failed to open the output",
+            ),
+        ];
+        for (error, message) in cases {
+            for bgm in [false, true] {
+                let start = Instant::now();
+                let result = AudioSession::start_with(
+                    &Refusing(error),
+                    device("in"),
+                    device("out"),
+                    &control,
+                    SessionOptions { bgm },
+                );
+                let text = result.err().expect("the open should fail");
+                assert!(text.contains(message), "{text}");
+                assert!(
+                    start.elapsed() < Duration::from_secs(1),
+                    "the BGM worker was not joined: {:?}",
+                    start.elapsed()
+                );
+            }
+        }
     }
 
     #[test]

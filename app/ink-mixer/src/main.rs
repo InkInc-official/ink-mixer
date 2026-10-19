@@ -1,3 +1,4 @@
+mod bgm_worker;
 mod cli;
 mod devices;
 mod gui;

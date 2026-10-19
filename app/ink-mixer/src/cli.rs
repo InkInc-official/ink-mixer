@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueHint};
+use ink_core::graph::BGM_VOLUME_RANGE;
 
 /// Ink Mixer: extensible real-time audio console for streamers
 #[derive(Debug, Parser)]
@@ -65,6 +66,31 @@ pub struct RunArgs {
         requires = "se"
     )]
     pub se_volume: f32,
+    /// Play this song (WAV or MP3, any length) through the BGM channel, read a little at a time
+    #[arg(long, value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub bgm: Option<PathBuf>,
+    /// Start the song again when it ends. Needs --bgm
+    #[arg(long, requires = "bgm")]
+    pub bgm_loop: bool,
+    /// Volume of the BGM channel in dB (-60 to +6). Needs --bgm
+    #[arg(
+        long,
+        value_name = "DB",
+        default_value_t = 0.0,
+        allow_negative_numbers = true,
+        value_parser = bgm_volume_db,
+        requires = "bgm"
+    )]
+    pub bgm_volume: f32,
+    /// For checking on a real device: every SECONDS (more than 1), pause the song and play it
+    /// again after 1 s; every second time, stop it and play it from the start. Needs --bgm
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        value_parser = cycle_seconds,
+        requires = "bgm"
+    )]
+    pub bgm_cycle: Option<f64>,
 }
 
 /// Parses a number of seconds that is finite and more than 0.
@@ -76,6 +102,36 @@ fn positive_seconds(text: &str) -> Result<f64, String> {
         Ok(seconds)
     } else {
         Err(format!("`{text}` must be more than 0"))
+    }
+}
+
+/// Parses a volume in dB that the BGM channel has: finite, from the lowest
+/// to the highest value of [`BGM_VOLUME_RANGE`].
+fn bgm_volume_db(text: &str) -> Result<f32, String> {
+    let db: f32 = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a number"))?;
+    let range = BGM_VOLUME_RANGE;
+    if db.is_finite() && db >= range.min && db <= range.max {
+        Ok(db)
+    } else {
+        Err(format!(
+            "`{text}` must be between {:+} and {:+} dB",
+            range.min, range.max
+        ))
+    }
+}
+
+/// Parses the seconds between two steps of `--bgm-cycle`: finite and more
+/// than 1, because a pause lasts 1 s and must end before the next step.
+fn cycle_seconds(text: &str) -> Result<f64, String> {
+    let seconds: f64 = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a number"))?;
+    if seconds.is_finite() && seconds > 1.0 {
+        Ok(seconds)
+    } else {
+        Err(format!("`{text}` must be more than 1"))
     }
 }
 
@@ -125,6 +181,10 @@ mod tests {
                 se: None,
                 se_every: 2.0,
                 se_volume: 0.0,
+                bgm: None,
+                bgm_loop: false,
+                bgm_volume: 0.0,
+                bgm_cycle: None,
             }))
         );
     }
@@ -199,6 +259,154 @@ mod tests {
             .find(|a| a.get_id() == "se_every")
             .unwrap();
         assert!(every.get_help().unwrap().to_string().contains("Needs --se"));
+    }
+
+    #[test]
+    fn run_accepts_a_song_with_its_options() {
+        let args = run_args(&[
+            "--bgm",
+            "songs/a.mp3",
+            "--bgm-loop",
+            "--bgm-volume",
+            "-18",
+            "--bgm-cycle",
+            "6",
+        ])
+        .unwrap();
+        assert_eq!(args.bgm, Some(PathBuf::from("songs/a.mp3")));
+        assert!(args.bgm_loop);
+        assert_eq!(args.bgm_volume, -18.0);
+        assert_eq!(args.bgm_cycle, Some(6.0));
+    }
+
+    #[test]
+    fn a_song_alone_uses_the_default_options() {
+        let args = run_args(&["--bgm", "a.wav"]).unwrap();
+        assert_eq!(args.bgm, Some(PathBuf::from("a.wav")));
+        assert!(!args.bgm_loop);
+        assert_eq!(args.bgm_volume, 0.0);
+        assert_eq!(args.bgm_cycle, None);
+    }
+
+    #[test]
+    fn the_bgm_options_need_bgm() {
+        for option in [
+            vec!["--bgm-loop"],
+            vec!["--bgm-volume", "-3"],
+            vec!["--bgm-cycle", "4"],
+        ] {
+            let error = run_args(&option).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "{option:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_song_can_be_played_with_a_sound_effect() {
+        let args = run_args(&["--bgm", "a.wav", "--se", "b.wav"]).unwrap();
+        assert_eq!(args.bgm, Some(PathBuf::from("a.wav")));
+        assert_eq!(args.se, Some(PathBuf::from("b.wav")));
+    }
+
+    /// Formats a number for the command line the way a person writes it.
+    fn text(value: f32) -> String {
+        format!("{value}")
+    }
+
+    #[test]
+    fn bgm_volume_must_be_in_the_range_of_the_bgm_channel() {
+        let min = BGM_VOLUME_RANGE.min;
+        let max = BGM_VOLUME_RANGE.max;
+        let good = [
+            text(min),
+            "-18.5".to_string(),
+            "0".to_string(),
+            "-0".to_string(),
+            "0.0".to_string(),
+            text(max),
+            format!("+{max}"),
+        ];
+        for value in &good {
+            let args = run_args(&["--bgm", "a.wav", &format!("--bgm-volume={value}")])
+                .unwrap_or_else(|e| panic!("{value:?} was refused: {e}"));
+            assert_eq!(args.bgm_volume, value.parse::<f32>().unwrap(), "{value}");
+        }
+        let bad = [
+            text(max + 0.5),
+            text(min - 0.5),
+            "-100".to_string(),
+            "nan".to_string(),
+            "NaN".to_string(),
+            "NAN".to_string(),
+            "inf".to_string(),
+            "Inf".to_string(),
+            "INF".to_string(),
+            "-inf".to_string(),
+            "-Inf".to_string(),
+            "infinity".to_string(),
+            "abc".to_string(),
+            String::new(),
+        ];
+        for value in &bad {
+            let error = run_args(&["--bgm", "a.wav", &format!("--bgm-volume={value}")])
+                .expect_err(&format!("{value:?} was accepted"));
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bgm_volume_error_names_the_range() {
+        let error = run_args(&["--bgm", "a.wav", "--bgm-volume=7"]).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("must be between -60 and +6 dB"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn bgm_cycle_must_be_more_than_one_second() {
+        for bad in ["1", "0.5", "0", "-1", "nan", "inf", "abc", ""] {
+            let result = run_args(&["--bgm", "a.wav", &format!("--bgm-cycle={bad}")]);
+            assert!(result.is_err(), "{bad:?} was accepted");
+        }
+        for good in ["1.01", "1.5", "2", "3600"] {
+            let args = run_args(&["--bgm", "a.wav", "--bgm-cycle", good]).unwrap();
+            assert_eq!(args.bgm_cycle, Some(good.parse::<f64>().unwrap()));
+        }
+    }
+
+    #[test]
+    fn run_help_describes_the_bgm_options() {
+        let command = Cli::command();
+        let run = command.find_subcommand("run").unwrap();
+        let help = |name: &str| {
+            run.get_arguments()
+                .find(|a| a.get_id() == name)
+                .unwrap_or_else(|| panic!("no argument {name}"))
+                .get_help()
+                .unwrap_or_else(|| panic!("{name} has no help"))
+                .to_string()
+        };
+        assert!(help("bgm").contains("any length"));
+        for name in ["bgm_loop", "bgm_volume", "bgm_cycle"] {
+            assert!(help(name).contains("Needs --bgm"), "{name}");
+        }
+        assert!(
+            help("bgm_cycle").contains("For checking on a real device"),
+            "{}",
+            help("bgm_cycle")
+        );
+        // The range in the help is the range of the channel.
+        let range = format!("({} to {:+})", BGM_VOLUME_RANGE.min, BGM_VOLUME_RANGE.max);
+        assert!(help("bgm_volume").contains(&range), "{range}");
     }
 
     #[test]
