@@ -1,9 +1,11 @@
 //! An audio session: the input and output streams that play
-//! MIC -> Gain -> MASTER -> output (ADR-0007). Used by `ink-mixer run` and
-//! by the window.
+//! MIC (+ SE) -> Gain -> MASTER -> output (ADR-0007, ADR-0009). Used by
+//! `ink-mixer run` and by the window.
 //!
 //! The output is opened first, then the input, and the two are connected
-//! with a ring buffer (`audio_link`). The output callback runs a `MicGraph`.
+//! with a ring buffer (`audio_link`). The output callback runs a `MicGraph`
+//! that has the sound effects (SE) channel; the session keeps the
+//! [`SeController`] for it.
 //! The sample rate and channel counts are chosen by actually opening the
 //! devices, because the numbers in `DeviceInfo` cannot be trusted (ALSA
 //! `sysdefault` reports that it supports everything).
@@ -17,7 +19,10 @@ use ink_backend::{
     OutputStream, StreamConfig, StreamError,
 };
 use ink_core::Config;
-use ink_core::graph::{LinkStats, MicGraph, MicrophoneSource, MixerControl, audio_link};
+use ink_core::graph::{
+    LinkStats, LinkWriter, MicGraph, MicrophoneSource, MixerControl, SeController, audio_link,
+    se_channel,
+};
 use tracing::{debug, warn};
 
 /// A stream without a callback for this long is considered stopped.
@@ -113,9 +118,12 @@ impl From<SessionError> for String {
 ///
 /// Dropping it stops both streams. The fields drop in order, so the input
 /// stops first and nothing writes to the ring buffer while the output stops.
+/// The SE controller drops after the output stream, so the player (in the
+/// output callback) is gone before the queues it shares are released.
 pub struct AudioSession {
     input: InputStream,
     output: OutputStream,
+    se: SeController,
     stats: Arc<LinkStats>,
     input_device: DeviceInfo,
     output_device: DeviceInfo,
@@ -148,11 +156,17 @@ impl AudioSession {
                 for &in_ch in &in_channels {
                     debug!("trying {rate} Hz, input {in_ch} ch, output {out_ch} ch");
                     match try_open(backend, &input, &output, control, rate, in_ch, out_ch) {
-                        Ok((input_stream, output_stream, stats)) => {
+                        Ok(Opened {
+                            input: input_stream,
+                            output: output_stream,
+                            stats,
+                            se,
+                        }) => {
                             let now = Instant::now();
                             return Ok(Self {
                                 input: input_stream,
                                 output: output_stream,
+                                se,
                                 stats,
                                 input_device: input,
                                 output_device: output,
@@ -201,6 +215,18 @@ impl AudioSession {
     /// Returns the output stream.
     pub fn output(&self) -> &OutputStream {
         &self.output
+    }
+
+    /// Returns the control side of the sound effects (SE) player.
+    pub fn se(&self) -> &SeController {
+        &self.se
+    }
+
+    /// Returns the control side of the sound effects (SE) player, to put
+    /// sounds in its slots and play them. Call it from the control thread
+    /// only (the main thread of the CLI, the UI thread of the GUI).
+    pub fn se_mut(&mut self) -> &mut SeController {
+        &mut self.se
     }
 
     /// Returns the statistics of the ring buffer between the streams.
@@ -298,6 +324,37 @@ impl From<BackendError> for OpenError {
     }
 }
 
+/// What [`try_open`] opened.
+struct Opened {
+    input: InputStream,
+    output: OutputStream,
+    stats: Arc<LinkStats>,
+    se: SeController,
+}
+
+/// The parts of the audio path for `rate`: the writer for the input
+/// callback, the graph for the output callback, the statistics of the ring
+/// buffer, and the control side of the SE player.
+///
+/// The graph and the SE player are made with the same `max_frames`
+/// ([`MAX_FRAMES_PER_CALLBACK`]), because the graph renders the SE player in
+/// parts of at most that many frames.
+fn build_graph(
+    control: &Arc<MixerControl>,
+    rate: u32,
+) -> (LinkWriter, MicGraph, Arc<LinkStats>, SeController) {
+    let (writer, reader, stats) = audio_link(rate, MAX_FRAMES_PER_CALLBACK);
+    let (se, player) = se_channel(rate, MAX_FRAMES_PER_CALLBACK);
+    let graph = MicGraph::new(
+        MicrophoneSource::new(reader),
+        Arc::clone(control),
+        rate,
+        MAX_FRAMES_PER_CALLBACK,
+    )
+    .with_se(player);
+    (writer, graph, stats, se)
+}
+
 /// Opens one configuration: the output first, then the input, so that the
 /// input does not run alone and overflow the ring buffer. On failure, returns
 /// which side could not be opened.
@@ -309,14 +366,8 @@ fn try_open(
     rate: u32,
     in_channels: u16,
     out_channels: u16,
-) -> Result<(InputStream, OutputStream, Arc<LinkStats>), (&'static str, OpenError)> {
-    let (mut writer, reader, stats) = audio_link(rate, MAX_FRAMES_PER_CALLBACK);
-    let mut graph = MicGraph::new(
-        MicrophoneSource::new(reader),
-        Arc::clone(control),
-        rate,
-        MAX_FRAMES_PER_CALLBACK,
-    );
+) -> Result<Opened, (&'static str, OpenError)> {
+    let (mut writer, mut graph, stats, se) = build_graph(control, rate);
 
     let out_config = StreamConfig {
         sample_rate: rate,
@@ -346,7 +397,12 @@ fn try_open(
         )
         .map_err(|e| ("input", e.into()))?;
 
-    Ok((input_stream, output_stream, stats))
+    Ok(Opened {
+        input: input_stream,
+        output: output_stream,
+        stats,
+        se,
+    })
 }
 
 /// Returns the sample rates to try: of the rates both devices report, 48000,
@@ -421,6 +477,8 @@ impl Watch {
 
 #[cfg(test)]
 mod tests {
+    use ink_core::graph::{SePolicy, SoundData};
+
     use super::*;
 
     #[test]
@@ -460,6 +518,34 @@ mod tests {
         assert_eq!(channel_candidates(&[2, 1], 1), vec![1]);
         // A device that reports no channels still gets one attempt with 1.
         assert_eq!(channel_candidates(&[2, 1], 0), vec![1]);
+    }
+
+    #[test]
+    fn the_graph_plays_the_se_through_the_controller() {
+        let control = Arc::new(MixerControl::new());
+        let (_writer, mut graph, _stats, mut se) = build_graph(&control, 48_000);
+        // More frames than one callback part (MAX_FRAMES_PER_CALLBACK), so
+        // the graph splits the block and the SE player is called in parts.
+        let frames = MAX_FRAMES_PER_CALLBACK * 2 + 100;
+        let sound = SoundData::new(48_000, vec![0.25; frames + 50], vec![-0.25; frames + 50]);
+        se.set_sound(0, Arc::new(sound)).unwrap();
+        se.play(0, 1.0, SePolicy::Overlap).unwrap();
+
+        let mut out = vec![0.0_f32; frames * 2];
+        graph.render(&mut out, 2);
+        assert!(out.chunks(2).all(|frame| frame == [0.25, -0.25]));
+        assert!(control.se.meter().take() > 0.24);
+    }
+
+    #[test]
+    fn the_graph_without_a_sound_is_silent() {
+        let control = Arc::new(MixerControl::new());
+        let (_writer, mut graph, _stats, se) = build_graph(&control, 44_100);
+        let mut out = vec![-1.0_f32; 2 * 480];
+        graph.render(&mut out, 2);
+        assert!(out.iter().all(|&sample| sample == 0.0));
+        assert_eq!(se.sample_rate(), 44_100);
+        assert_eq!(se.outstanding(), 0);
     }
 
     #[test]

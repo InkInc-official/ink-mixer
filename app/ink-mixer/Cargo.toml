@@ -15,6 +15,7 @@ directories = "6.0.0"
 eframe = { version = "0.36.2", default-features = false, features = ["glow", "x11", "wayland"] }
 ink-backend = { path = "../../crates/ink-backend" }
 ink-core = { path = "../../crates/ink-core" }
+ink-media = { path = "../../crates/ink-media" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
