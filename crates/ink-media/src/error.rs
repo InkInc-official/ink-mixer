@@ -50,6 +50,9 @@ impl fmt::Display for MediaError {
                 "the audio is longer than the limit of {} s",
                 limit.as_secs_f64()
             ),
+            Self::InvalidSampleRate(0) => {
+                write!(f, "the file does not say a valid sample rate (0 Hz)")
+            }
             Self::InvalidSampleRate(rate) => write!(f, "invalid sample rate: {rate} Hz"),
             Self::Resample(msg) => write!(f, "failed to resample the audio: {msg}"),
         }
@@ -97,7 +100,12 @@ mod tests {
         );
         assert_eq!(
             MediaError::InvalidSampleRate(0).to_string(),
-            "invalid sample rate: 0 Hz"
+            "the file does not say a valid sample rate (0 Hz)"
+        );
+        // Any other value is shown as it is.
+        assert_eq!(
+            MediaError::InvalidSampleRate(7).to_string(),
+            "invalid sample rate: 7 Hz"
         );
     }
 
