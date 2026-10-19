@@ -63,6 +63,10 @@ Ink Mixer は、特定のサービス（YouTube や Spotify など）から音�
 
 これは一般的な案内で、法的な助言ではありません。方針の理由は [ADR-0008](docs/adr/0008-external-services.md) を参照してください。
 
+### BGM のループについて
+
+曲をくり返し流す（ループ）ときは、**WAV をおすすめします**。つなぎ目に隙間が出ません。MP3 は、エンコーダーの情報（LAME タグ）が入っているファイルなら、つなぎ目に隙間が出ません。入っていないファイルでは、つなぎ目に 13〜20 ミリ秒ほどの小さな隙間が出ることがあります（測定は [ADR-0009](docs/adr/0009-phase2-audio-thread-design.md) を参照）。
+
 ### ドキュメント
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — 設計の正典（Architecture Blueprint）
@@ -134,6 +138,10 @@ Examples of audio that is permitted for streaming (information, not a feature):
 For royalty-free BGM too, check the terms of use of where it is distributed (credit notices, whether it may be used in streams, and so on).
 
 This is general information, not legal advice. For the reasoning, see [ADR-0008](docs/adr/0008-external-services.md) (in Japanese).
+
+### Looping the BGM
+
+To play a song again and again (loop), **WAV is recommended**: there is no gap at the join. An MP3 file that has the encoder's information (a LAME tag) has no gap either. One without it can have a small gap at the join (about 13 to 20 milliseconds in our measurements; see [ADR-0009](docs/adr/0009-phase2-audio-thread-design.md), in Japanese).
 
 ### Documentation
 
