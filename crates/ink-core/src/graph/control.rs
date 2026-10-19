@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use super::{DbRange, MASTER_VOLUME_RANGE, MIC_GAIN_RANGE, PeakMeter, db_to_gain};
+use super::{DbRange, MASTER_VOLUME_RANGE, MIC_GAIN_RANGE, PeakMeter, SE_VOLUME_RANGE, db_to_gain};
 
 /// An f32 stored as its bit pattern in an `AtomicU32`.
 #[derive(Debug)]
@@ -113,16 +113,21 @@ impl ChannelControl {
     }
 }
 
-/// The controls of the Phase 1 mixer: MIC and MASTER.
+/// The controls of the mixer: MIC, the sound effects (SE), and MASTER.
 ///
 /// Shared as an `Arc<MixerControl>` by the UI and the audio thread; it holds
 /// only atomics, so no lock is needed.
 ///
-/// The MASTER mute is not used in Phase 1 and stays off.
+/// The MASTER mute is not used and stays off. The SE channel works only in a
+/// graph that has a sound effects player (`MicGraph::with_se`); in the
+/// Phase 1 graph, its controls are not read.
 #[derive(Debug)]
 pub struct MixerControl {
     /// MIC gain (-60 to +24 dB), mute, and meter.
     pub mic: ChannelControl,
+    /// Volume of the sound effects (-60 to +6 dB), mute, and meter (Phase 2,
+    /// ADR-0009).
+    pub se: ChannelControl,
     /// Master volume (-60 to +6 dB) and meter.
     pub master: ChannelControl,
 }
@@ -132,6 +137,7 @@ impl MixerControl {
     pub fn new() -> Self {
         Self {
             mic: ChannelControl::new(MIC_GAIN_RANGE),
+            se: ChannelControl::new(SE_VOLUME_RANGE),
             master: ChannelControl::new(MASTER_VOLUME_RANGE),
         }
     }
@@ -151,7 +157,7 @@ mod tests {
     #[test]
     fn initial_values() {
         let control = MixerControl::new();
-        for channel in [&control.mic, &control.master] {
+        for channel in [&control.mic, &control.se, &control.master] {
             assert_eq!(channel.gain_db(), 0.0);
             assert_eq!(channel.gain(), 1.0);
             assert!(!channel.is_muted());
@@ -171,6 +177,33 @@ mod tests {
         control.master.set_gain_db(10.0);
         assert_eq!(control.master.gain_db(), 6.0);
         assert_eq!(control.master.gain(), db_to_gain(6.0));
+
+        control.se.set_gain_db(10.0);
+        assert_eq!(control.se.gain_db(), 6.0);
+        assert_eq!(control.se.gain(), db_to_gain(6.0));
+        control.se.set_gain_db(-100.0);
+        assert_eq!(control.se.gain_db(), -60.0);
+        assert_eq!(control.se.gain(), 0.0);
+    }
+
+    #[test]
+    fn the_channels_are_independent() {
+        let control = MixerControl::new();
+        control.se.set_gain_db(-12.0);
+        control.se.set_muted(true);
+        control.se.meter().record(0.5);
+
+        assert_eq!(control.mic.gain_db(), 0.0);
+        assert!(!control.mic.is_muted());
+        assert_eq!(control.mic.meter().take(), 0.0);
+        assert_eq!(control.master.gain_db(), 0.0);
+        assert!(!control.master.is_muted());
+        assert_eq!(control.master.meter().take(), 0.0);
+
+        assert_eq!(control.se.gain_db(), -12.0);
+        assert!(control.se.is_muted());
+        assert_eq!(control.se.mute_gain(), 0.0);
+        assert_eq!(control.se.meter().take(), 0.5);
     }
 
     #[test]
@@ -188,11 +221,13 @@ mod tests {
     #[test]
     fn mute_sets_mute_gain() {
         let control = MixerControl::new();
-        control.mic.set_muted(true);
-        assert!(control.mic.is_muted());
-        assert_eq!(control.mic.mute_gain(), 0.0);
-        control.mic.set_muted(false);
-        assert_eq!(control.mic.mute_gain(), 1.0);
+        for channel in [&control.mic, &control.se] {
+            channel.set_muted(true);
+            assert!(channel.is_muted());
+            assert_eq!(channel.mute_gain(), 0.0);
+            channel.set_muted(false);
+            assert_eq!(channel.mute_gain(), 1.0);
+        }
     }
 
     #[test]

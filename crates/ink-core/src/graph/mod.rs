@@ -25,13 +25,17 @@ mod link;
 mod meter;
 mod mic_graph;
 mod mixer;
+mod se;
+mod se_control;
+mod se_player;
 mod sound;
 
 pub use buffer::AudioBuffer;
 pub use control::{ChannelControl, MixerControl};
 pub use gain::GainNode;
 pub use level::{
-    DbRange, MASTER_VOLUME_RANGE, MIC_GAIN_RANGE, SILENCE_DB, block_peak, db_to_gain, gain_to_db,
+    DbRange, MASTER_VOLUME_RANGE, MIC_GAIN_RANGE, SE_VOLUME_RANGE, SILENCE_DB, block_peak,
+    db_to_gain, gain_to_db,
 };
 pub use link::{
     LinkReader, LinkStats, LinkWriter, MIN_CAPACITY, MIN_TARGET, MicrophoneSource, audio_link,
@@ -40,6 +44,13 @@ pub use link::{
 pub use meter::PeakMeter;
 pub use mic_graph::{MicGraph, write_interleaved};
 pub use mixer::MixerNode;
+pub use se::{
+    SE_COMMAND_CAPACITY, SE_COMMANDS_PER_BLOCK, SE_FADE_MS, SE_FADING_VOICES, SE_PLAYING_VOICES,
+    SE_RETURN_CAPACITY, SE_SLOTS, SE_TOTAL_BYTES_LIMIT, SE_VOICES, SeCommand, SePolicy, SeStats,
+    SeStatsSnapshot,
+};
+pub use se_control::{SeController, SeError, se_channel};
+pub use se_player::SePlayer;
 pub use sound::SoundData;
 
 /// A processing step that transforms one buffer in place.

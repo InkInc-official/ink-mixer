@@ -1258,6 +1258,7 @@ dependencies = [
  "eframe",
  "ink-backend",
  "ink-core",
+ "ink-media",
  "tracing",
  "tracing-subscriber",
 ]
