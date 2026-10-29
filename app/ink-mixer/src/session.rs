@@ -160,24 +160,15 @@ pub struct AudioSession {
 
 impl AudioSession {
     /// Opens `input` and `output`, trying the candidate configurations in
-    /// order, and starts playing through a graph that follows `control`. The
-    /// session has no BGM (see [`start_with`](Self::start_with)).
-    pub fn start(
-        backend: &dyn AudioBackend,
-        input: DeviceInfo,
-        output: DeviceInfo,
-        control: &Arc<MixerControl>,
-    ) -> Result<Self, String> {
-        Self::start_with(backend, input, output, control, SessionOptions::default())
-    }
-
-    /// [`start`](Self::start) with `options`.
+    /// order, and starts playing through a graph that follows `control`. With
+    /// `options.bgm` the session also has the BGM (see [`SessionOptions`]).
     ///
     /// # Errors
     ///
-    /// Besides the errors of `start`, fails if the BGM worker thread cannot
-    /// be started. It is started before the streams are opened, so nothing
-    /// is playing when it fails.
+    /// Fails if the devices have no sample rate in common, if no candidate
+    /// configuration can be opened, or if the BGM worker thread cannot be
+    /// started. The worker is started before the streams are opened, so
+    /// nothing is playing when it fails.
     pub fn start_with(
         backend: &dyn AudioBackend,
         input: DeviceInfo,

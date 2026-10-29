@@ -21,7 +21,10 @@ pub use asset::{
     Asset, AssetFormat, AssetId, AssetIdError, AssetInfo, AssetKind, AssetState, ProbeFailure,
     SE_MAX_DURATION,
 };
-pub use config::{AudioConfig, CONFIG_VERSION, Config, ConfigError, MixerConfig};
+pub use config::{
+    AudioConfig, BgmConfig, CONFIG_VERSION, Config, ConfigError, MixerConfig, PadSetting,
+    SoundPadConfig,
+};
 pub use device_id::DeviceId;
 pub use library::{Library, LibraryError, Opened};
 pub use library_import::{ImportError, ImportOutcome};

@@ -3,9 +3,12 @@ mod cli;
 mod devices;
 mod gui;
 mod library_cmd;
+mod library_view;
 mod run;
+mod se_loader;
 mod session;
 mod settings;
+mod sound_state;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;

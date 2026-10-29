@@ -1005,6 +1005,7 @@ mod tests {
     fn a_failure_is_shown_as_one_line() {
         let failure = BgmFailure {
             path: Some(std::path::PathBuf::from("music/a.mp3")),
+            kind: crate::bgm_worker::FailureKind::NotASound,
             message: "the audio file has no sound".to_string(),
         };
         assert_eq!(
