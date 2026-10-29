@@ -2,6 +2,7 @@ mod bgm_worker;
 mod cli;
 mod devices;
 mod gui;
+mod library_cmd;
 mod run;
 mod session;
 mod settings;
@@ -44,6 +45,7 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Devices) => devices::run(&CpalBackend::new(), &config),
         Some(Command::Run(args)) => run::run(&CpalBackend::new(), &config, &args),
+        Some(Command::Library(args)) => library_cmd::run(&args),
         None => gui::run(&config, save_to),
     }
 }

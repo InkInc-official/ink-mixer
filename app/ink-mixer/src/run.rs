@@ -25,8 +25,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ink_backend::{AudioBackend, DeviceInfo};
-use ink_core::Config;
 use ink_core::graph::{MixerControl, SILENCE_DB, SePolicy, SoundData, gain_to_db};
+use ink_core::{Config, SE_MAX_DURATION};
 use ink_media::{SoundInfo, load_sound, probe};
 use tracing::{error, warn};
 
@@ -38,8 +38,6 @@ use crate::session::{AudioSession, SessionOptions, choose_devices};
 const POLL: Duration = Duration::from_millis(100);
 /// How often the levels are printed.
 const DISPLAY: Duration = Duration::from_millis(500);
-/// The longest sound effect that `--se` loads (Issue 62).
-const SE_MAX_DURATION: Duration = Duration::from_secs(60);
 /// The slot of the SE player that holds the sound.
 const SE_SLOT: usize = 0;
 /// The most plays sent in one check. If the loop was late for longer, the
