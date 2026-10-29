@@ -2,7 +2,8 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueHint};
+use clap::{Args, Parser, Subcommand, ValueEnum, ValueHint};
+use ink_core::AssetKind;
 use ink_core::graph::BGM_VOLUME_RANGE;
 
 /// Ink Mixer: extensible real-time audio console for streamers
@@ -20,6 +21,63 @@ pub enum Command {
     /// Play the microphone through the output (MIC -> Gain -> MASTER). Use headphones.
     /// The devices come from the config, but the levels are not read from the config
     Run(RunArgs),
+    /// The sound library: the BGM and SE folders of Ink Mixer and their index
+    Library(LibraryArgs),
+}
+
+/// `library` の引数。
+#[derive(Debug, PartialEq, Args)]
+pub struct LibraryArgs {
+    /// Use this folder as the library instead of the default one (see `library path`).
+    /// For checking and tests; it can be given before or after the action
+    #[arg(
+        long,
+        value_name = "DIR",
+        global = true,
+        value_hint = ValueHint::DirPath
+    )]
+    pub library_dir: Option<PathBuf>,
+    #[command(subcommand)]
+    pub action: LibraryAction,
+}
+
+#[derive(Debug, PartialEq, Subcommand)]
+pub enum LibraryAction {
+    /// Print the folder of the library (the BGM and SE folders are under `sounds`)
+    Path,
+    /// List the sounds, one per line: name, ID, kind, state, length, path
+    List,
+    /// Look at the sound folders for files that were put in by hand, and save what was found
+    Scan,
+    /// Copy a sound file (WAV or MP3) into the library
+    Import(ImportArgs),
+}
+
+/// `library import` の引数。
+#[derive(Debug, PartialEq, Args)]
+pub struct ImportArgs {
+    /// The sound file to copy (the original is not changed)
+    #[arg(value_name = "FILE", value_hint = ValueHint::FilePath)]
+    pub file: PathBuf,
+    /// Which folder it goes to: `bgm` (a song, any length) or `se` (a sound effect, up to 60 s)
+    #[arg(long, value_enum, ignore_case = true, value_name = "KIND")]
+    pub kind: KindArg,
+}
+
+/// The kind of a sound on the command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum KindArg {
+    Bgm,
+    Se,
+}
+
+impl From<KindArg> for AssetKind {
+    fn from(kind: KindArg) -> Self {
+        match kind {
+            KindArg::Bgm => Self::Bgm,
+            KindArg::Se => Self::Se,
+        }
+    }
 }
 
 /// `run` の引数。
@@ -434,6 +492,135 @@ mod tests {
         assert_eq!(args.gain, -6.0);
         assert_eq!(args.master, -20.5);
         assert_eq!(args.seconds, 180);
+    }
+
+    fn library_args(args: &[&str]) -> Result<LibraryArgs, clap::Error> {
+        let mut full = vec!["ink-mixer", "library"];
+        full.extend_from_slice(args);
+        match Cli::try_parse_from(full)?.command {
+            Some(Command::Library(args)) => Ok(args),
+            other => panic!("expected library, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn library_has_four_actions() {
+        for (name, action) in [
+            ("path", LibraryAction::Path),
+            ("list", LibraryAction::List),
+            ("scan", LibraryAction::Scan),
+        ] {
+            let args = library_args(&[name]).unwrap();
+            assert_eq!(args.action, action, "{name}");
+            assert_eq!(args.library_dir, None, "{name}");
+        }
+        let args = library_args(&["import", "song.mp3", "--kind", "bgm"]).unwrap();
+        assert_eq!(
+            args.action,
+            LibraryAction::Import(ImportArgs {
+                file: PathBuf::from("song.mp3"),
+                kind: KindArg::Bgm,
+            })
+        );
+    }
+
+    #[test]
+    fn library_needs_an_action() {
+        let error = library_args(&[]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn import_needs_a_file_and_a_kind() {
+        let error = library_args(&["import", "--kind", "se"]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        let error = library_args(&["import", "clap.wav"]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+        assert!(error.to_string().contains("--kind"), "{error}");
+    }
+
+    #[test]
+    fn the_kind_is_bgm_or_se_in_any_case() {
+        for (text, kind) in [
+            ("bgm", KindArg::Bgm),
+            ("se", KindArg::Se),
+            ("BGM", KindArg::Bgm),
+            ("Se", KindArg::Se),
+        ] {
+            let args = library_args(&["import", "a.wav", "--kind", text]).unwrap();
+            let LibraryAction::Import(import) = args.action else {
+                panic!("expected import");
+            };
+            assert_eq!(import.kind, kind, "{text}");
+        }
+        for bad in ["music", "", "bgm2", "sfx"] {
+            let error = library_args(&["import", "a.wav", "--kind", bad]).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::InvalidValue,
+                "{bad:?}"
+            );
+            assert_eq!(error.exit_code(), 2, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_kind_on_the_command_line_is_the_kind_of_the_library() {
+        assert_eq!(AssetKind::from(KindArg::Bgm), AssetKind::Bgm);
+        assert_eq!(AssetKind::from(KindArg::Se), AssetKind::Se);
+    }
+
+    #[test]
+    fn the_library_dir_can_be_given_before_or_after_the_action() {
+        let before = library_args(&["--library-dir", "/tmp/lib", "list"]).unwrap();
+        let after = library_args(&["list", "--library-dir", "/tmp/lib"]).unwrap();
+        assert_eq!(before, after);
+        assert_eq!(before.library_dir, Some(PathBuf::from("/tmp/lib")));
+
+        let import = library_args(&[
+            "import",
+            "a.wav",
+            "--kind",
+            "se",
+            "--library-dir=relative/lib",
+        ])
+        .unwrap();
+        assert_eq!(import.library_dir, Some(PathBuf::from("relative/lib")));
+    }
+
+    #[test]
+    fn the_help_says_what_library_dir_is_for() {
+        let command = Cli::command();
+        let library = command.find_subcommand("library").unwrap();
+        let arg = library
+            .get_arguments()
+            .find(|a| a.get_id() == "library_dir")
+            .unwrap();
+        let help = arg.get_help().unwrap().to_string();
+        assert!(help.contains("instead of the default"), "{help}");
+        assert!(help.contains("For checking and tests"), "{help}");
+        // Every action has a help line, and so does the kind.
+        for name in ["path", "list", "scan", "import"] {
+            let action = library.find_subcommand(name).unwrap();
+            assert!(action.get_about().is_some(), "{name} has no help");
+        }
+        let import = library.find_subcommand("import").unwrap();
+        let kind = import
+            .get_arguments()
+            .find(|a| a.get_id() == "kind")
+            .unwrap();
+        let help = kind.get_help().unwrap().to_string();
+        assert!(help.contains("bgm") && help.contains("se"), "{help}");
     }
 
     #[test]

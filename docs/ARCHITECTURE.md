@@ -354,12 +354,13 @@ BGMやSEの設定にOS上の絶対パスを直接保存し続けない。
 
 ``` text
 Asset
-├─ id
+├─ id                "bgm-0005" | "se-0012"（接頭辞が type）
 ├─ type: BGM | SE
 ├─ display_name
-├─ source_path
-├─ metadata
-└─ availability
+├─ path              種類のフォルダからの相対パス（"/" 区切り。絶対パスは保存しない）
+├─ info              形式・サンプルレート・チャンネル数・フレーム数（まだ読めていなければ無い）
+├─ trigger_words     SEを鳴らす言葉（索引には保存のみ。検証とUIは後続のIssue）
+└─ state             使える | ファイルが無い | 読めない（保存しない。開くとき・再スキャンで決める）
 ```
 
 Trigger等は、
@@ -387,7 +388,17 @@ asset_id = "..."
 -   取り込み画面に「権利を確認した音源（フリーBGMなど）を入れてください」と表示する
 -   外部のサービスから音を取り込む機能は作らない（2.1）
 
-取り込み後、Assetが指すのはInk Mixerのフォルダ内のコピーになる。上の `source_path` の持ち方は、作るときに決める。
+取り込み後、Assetが指すのはInk Mixerのフォルダ内のコピーになる。フォルダの場所、索引、IDの付け方、取り込みと再スキャンの規則は、ADR-0010で決めた。
+
+## 音源フォルダと索引（ADR-0010）
+
+-   音源のフォルダ: データフォルダ（Linuxは `~/.local/share/inkmixer/`、Windowsは `%LOCALAPPDATA%\Ink Inc\Ink Mixer\data\`）の下の `sounds/bgm/` と `sounds/se/`。場所は設定ファイルに保存しない
+-   索引: データフォルダの `library.toml`（音源のフォルダの外）。Assetの台帳で、`version` を持つ。壊れた索引・新しすぎる版は開かずエラーにし、上書きしない
+-   ID: `bgm-0005` / `se-0012`（接頭辞 + 4桁以上の連番）。一度付けたIDは再利用しない。設定にはIDだけを保存し、ファイルの場所は使うときに作る
+-   取り込み: フォルダへコピー。同じ名前（大文字小文字を区別しない）で中身が同じなら、コピーせず既存のAssetを返す
+-   再スキャン: フォルダに直接入れたファイルを反映する。ファイルが無くなったAssetは、IDを残して「ファイルが無い」にする
+-   Windows と Linux の両方で使えない名前のファイルは、取り込まない・名前を直す（予約名、`?` など）
+-   最小のコマンド: `ink-mixer library path | list | scan | import <FILE> --kind bgm|se`（`--library-dir` で場所を差し替えられる）
 
 ------------------------------------------------------------------------
 
@@ -1127,7 +1138,7 @@ ink-mixer/
 │  ├─ ink-core/
 │  ├─ ink-audio/
 │  ├─ ink-events/
-│  ├─ ink-assets/
+│  ├─ ink-assets/           # 今はink-coreの中（Asset・ライブラリ。必要になってから分ける。ADR-0009、0010）
 │  ├─ ink-dsp/
 │  ├─ ink-backend/
 │  ├─ ink-media/            # 音源のデコード・リサンプル（ADR-0009）
@@ -1528,7 +1539,7 @@ AIエージェントはこれらを「決定済み」と扱わないこと。
 
 決定時にはADR（Architecture Decision Record）を残す。
 
-決定済みの事項は `docs/adr/` と AGENTS.md §6 を参照する（音声I/Oライブラリ: ADR-0002、GUI framework: ADR-0004、Audio Graph と値の受け渡し: ADR-0007、外部サービスとの関係: ADR-0008、Phase 2の音声スレッドの作りと音源のデコード: ADR-0009）。
+決定済みの事項は `docs/adr/` と AGENTS.md §6 を参照する（音声I/Oライブラリ: ADR-0002、GUI framework: ADR-0004、Audio Graph と値の受け渡し: ADR-0007、外部サービスとの関係: ADR-0008、Phase 2の音声スレッドの作りと音源のデコード: ADR-0009、音源フォルダ・Asset ID・索引・取り込み: ADR-0010）。
 
 ------------------------------------------------------------------------
 
@@ -1544,7 +1555,8 @@ docs/adr/
 ├─ 0006-japanese-font.md
 ├─ 0007-audio-graph-and-realtime-communication.md
 ├─ 0008-external-services.md
-└─ 0009-phase2-audio-thread-design.md
+├─ 0009-phase2-audio-thread-design.md
+└─ 0010-asset-id-and-library-index.md
 ```
 
 今後の候補（番号は起票時に決める）: LV2 Host library、Plugin process isolation など。

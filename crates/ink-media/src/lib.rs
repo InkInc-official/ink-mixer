@@ -22,6 +22,7 @@
 
 #![forbid(unsafe_code)]
 
+mod asset;
 mod decode;
 mod error;
 mod reader;
@@ -31,6 +32,7 @@ mod stream_resample;
 #[cfg(test)]
 mod test_util;
 
+pub use asset::asset_info;
 pub use decode::{Decoded, decode_file};
 pub use error::MediaError;
 pub use reader::{SoundFormat, SoundInfo, SoundReader, probe};

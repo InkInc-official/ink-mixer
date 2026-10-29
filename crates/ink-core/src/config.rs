@@ -7,12 +7,13 @@
 
 use std::fmt;
 use std::fs;
-use std::io::{self, Write as _};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
 use crate::DeviceId;
+use crate::atomic_file::write_atomically;
 use crate::graph::{MASTER_VOLUME_RANGE, MIC_GAIN_RANGE};
 
 /// Version of the configuration format written by this build.
@@ -161,12 +162,7 @@ impl Config {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(ConfigError::Io)?;
         }
-        let tmp = temp_path(path);
-        let result = write_synced(&tmp, text.as_bytes()).and_then(|()| fs::rename(&tmp, path));
-        if result.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        result.map_err(ConfigError::Io)
+        write_atomically(path, text.as_bytes()).map_err(ConfigError::Io)
     }
 
     fn from_toml(text: &str) -> Result<Self, ConfigError> {
@@ -179,19 +175,6 @@ impl Config {
         }
         toml::from_str(text).map_err(parse)
     }
-}
-
-/// Creates `path`, writes `bytes`, and flushes them to the disk.
-fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = fs::File::create(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
-fn temp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
-    path.with_file_name(name)
 }
 
 /// An error while loading or saving the configuration.
@@ -234,7 +217,10 @@ impl std::error::Error for ConfigError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
+    use crate::atomic_file::temp_path;
 
     /// A fresh directory under the system temp dir, unique per test.
     fn test_dir(name: &str) -> PathBuf {
