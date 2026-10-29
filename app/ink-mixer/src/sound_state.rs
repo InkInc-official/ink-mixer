@@ -25,12 +25,6 @@
 //! frames after. The sound effects are read by [`SeLoader`] on its own thread;
 //! [`PadBank::poll`] takes the results.
 
-// The window uses all of this in the later steps of #64; remove this there.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the window in later steps of #64")
-)]
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

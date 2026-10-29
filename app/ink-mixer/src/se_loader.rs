@@ -34,12 +34,6 @@
 //! finished (at most about 0.2 s), and the jobs that are waiting are not
 //! done.
 
-// The window uses all of this in the later steps of #64; remove this there.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the window in later steps of #64")
-)]
-
 use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};

@@ -13,12 +13,6 @@
 //!
 //! The workers get paths ([`Resolved::Found`]), never the library.
 
-// The window uses all of this in the later steps of #64; remove this there.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the window in later steps of #64")
-)]
-
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
