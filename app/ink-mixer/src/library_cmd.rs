@@ -618,8 +618,9 @@ mod tests {
         let error = LibraryError::Index(ink_core::IndexError::MissingVersion);
         let lines = open_error_lines(root, &error);
         assert_eq!(lines.len(), 2);
+        let index = root.join("library.toml");
         assert!(
-            lines[0].starts_with("error: /lib/library.toml cannot be used"),
+            lines[0].starts_with(&format!("error: {} cannot be used", index.display())),
             "{}",
             lines[0]
         );
@@ -871,7 +872,7 @@ mod tests {
         let ran = run_action(&root, import_action(&song, KindArg::Bgm));
         assert!(ran.ok, "{}", ran.err);
         assert!(ran.err.is_empty(), "{}", ran.err);
-        let copy = root.join("sounds/bgm/音楽 テスト.wav");
+        let copy = root.join("sounds").join("bgm").join("音楽 テスト.wav");
         assert_eq!(ran.out, format!("imported\tbgm-0001\t{}\n", copy.display()));
         assert!(copy.is_file());
         let ran = run_action(&root, import_action(&clap, KindArg::Se));
@@ -890,7 +891,7 @@ mod tests {
         let ran = run_action(&root, LibraryAction::List);
         assert!(ran.ok);
         assert!(ran.err.is_empty(), "{}", ran.err);
-        let se_copy = root.join("sounds/se/clap.wav");
+        let se_copy = root.join("sounds").join("se").join("clap.wav");
         assert_eq!(
             ran.out_lines(),
             [
@@ -986,7 +987,10 @@ mod tests {
             "{}",
             ran.err
         );
-        for folder in [root.join("sounds/bgm"), root.join("sounds/se")] {
+        for folder in [
+            root.join("sounds").join("bgm"),
+            root.join("sounds").join("se"),
+        ] {
             assert!(
                 ran.err.contains(&folder.display().to_string()),
                 "{}",
