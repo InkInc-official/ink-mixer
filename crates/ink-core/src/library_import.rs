@@ -873,6 +873,8 @@ mod tests {
 
     // -- the names of the copies ----------------------------------------------------
 
+    // Windows cannot create the source names with `fs::write` (error 123); checked on a real machine (#33).
+    #[cfg(unix)]
     #[test]
     fn names_that_windows_cannot_have_are_made_safe_and_the_scan_accepts_them() {
         let (root, mut library, sources) = setup("safe-names");

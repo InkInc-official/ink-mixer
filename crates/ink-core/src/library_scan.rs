@@ -869,6 +869,8 @@ mod tests {
         );
     }
 
+    // Windows cannot create these names with `fs::write` (error 123); checked on a real machine (#33).
+    #[cfg(unix)]
     #[test]
     fn names_that_windows_cannot_have_are_told_and_not_taken() {
         let root = test_root("unsafe");
@@ -903,6 +905,8 @@ mod tests {
         );
     }
 
+    // Windows treats names that differ only in case as one file; checked on a real machine (#33).
+    #[cfg(unix)]
     #[test]
     fn a_name_that_differs_from_an_asset_only_in_case_is_a_conflict() {
         let root = test_root("case-asset");
@@ -922,6 +926,8 @@ mod tests {
         assert_eq!(library.assets()[0].relative_path(), "Song.wav");
     }
 
+    // Windows treats names that differ only in case as one file; checked on a real machine (#33).
+    #[cfg(unix)]
     #[test]
     fn two_new_files_that_differ_only_in_case_give_one_asset_and_a_conflict() {
         let root = test_root("case-new");
