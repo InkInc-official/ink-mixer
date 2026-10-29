@@ -52,13 +52,63 @@ const IDLE_NAP: Duration = Duration::from_millis(2);
 /// How long the worker waits when the ring buffer is full.
 const FULL_NAP: Duration = Duration::from_millis(5);
 
+/// What kind of thing went wrong with a song, so that the window can say it
+/// in Japanese. The text of the error ([`BgmFailure::message`]) stays English,
+/// for logs and bug reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The file is not there (it was deleted or renamed).
+    NotFound,
+    /// The file is there but cannot be read (no permission, a disk error).
+    CannotRead,
+    /// The file is not a sound that can be played: not WAV or MP3, no audio
+    /// track, or no sound in it.
+    NotASound,
+    /// The sound broke while it was decoded.
+    Broken,
+    /// Anything else (a sample rate that cannot be used, a resampling error).
+    Other,
+}
+
 /// Why a song stopped, for the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BgmFailure {
     /// The file of the song, if there was one.
     pub path: Option<PathBuf>,
+    /// What kind of failure it was.
+    pub kind: FailureKind,
     /// What went wrong (the text of the error).
     pub message: String,
+}
+
+impl BgmFailure {
+    /// One line in Japanese for the window: the song `name` (the display name,
+    /// never a path) and why it cannot be played. The English
+    /// [`message`](Self::message) is shown beside it as the detail.
+    pub fn message_ja(&self, name: &str) -> String {
+        let reason = match self.kind {
+            FailureKind::NotFound => "ファイルが見つかりません",
+            FailureKind::CannotRead => "ファイルを読めません",
+            FailureKind::NotASound => "音声として読めません（WAV / MP3 か確認してください）",
+            FailureKind::Broken => "音声が壊れていて、続けられません",
+            FailureKind::Other => "原因は詳細を見てください",
+        };
+        format!("「{name}」を再生できません：{reason}")
+    }
+}
+
+/// The kind of a failure, from the error of the media code.
+fn failure_kind(error: &MediaError) -> FailureKind {
+    match error {
+        MediaError::Io(e) if e.kind() == io::ErrorKind::NotFound => FailureKind::NotFound,
+        MediaError::Io(_) => FailureKind::CannotRead,
+        MediaError::UnsupportedFormat | MediaError::NoAudioTrack | MediaError::Empty => {
+            FailureKind::NotASound
+        }
+        MediaError::Decode(_) => FailureKind::Broken,
+        // `MediaError` may get more kinds; they are "other" until named here.
+        _ => FailureKind::Other,
+    }
 }
 
 impl fmt::Display for BgmFailure {
@@ -322,7 +372,7 @@ impl Worker {
             }
             Err(e) => {
                 let path = self.path.clone();
-                self.fail(path, e.to_string());
+                self.fail(path, &e);
                 return false;
             }
         }
@@ -379,7 +429,7 @@ impl Worker {
                     self.stream = Some(stream);
                 }
                 Err(e) => {
-                    self.fail(Some(path), e.to_string());
+                    self.fail(Some(path), &e);
                     return;
                 }
             }
@@ -387,7 +437,7 @@ impl Worker {
             && let Err(e) = stream.rewind()
         {
             let path = self.path.clone();
-            self.fail(path, e.to_string());
+            self.fail(path, &e);
             return;
         }
 
@@ -406,7 +456,8 @@ impl Worker {
     /// The line that the user sees is printed by whoever takes the failure
     /// with [`Bgm::take_error`]; a caller that does not read it sees the
     /// failure only with `RUST_LOG=debug`.
-    fn fail(&mut self, path: Option<PathBuf>, message: String) {
+    fn fail(&mut self, path: Option<PathBuf>, error: &MediaError) {
+        let message = error.to_string();
         match &path {
             Some(path) => debug!("BGM stopped: {}: {message}", path.display()),
             None => debug!("BGM stopped: {message}"),
@@ -421,7 +472,11 @@ impl Worker {
         // already marked.
         let mut slot = self.failure.lock().unwrap_or_else(PoisonError::into_inner);
         if slot.is_none() {
-            *slot = Some(BgmFailure { path, message });
+            *slot = Some(BgmFailure {
+                path,
+                kind: failure_kind(error),
+                message,
+            });
         }
     }
 }
@@ -935,14 +990,78 @@ mod tests {
     fn a_failure_is_shown_with_its_file() {
         let with = BgmFailure {
             path: Some(PathBuf::from("music/a.mp3")),
+            kind: FailureKind::NotASound,
             message: "the audio file has no sound".to_string(),
         };
         assert_eq!(with.to_string(), "music/a.mp3: the audio file has no sound");
         let without = BgmFailure {
             path: None,
+            kind: FailureKind::Other,
             message: "oops".to_string(),
         };
         assert_eq!(without.to_string(), "oops");
+    }
+
+    #[test]
+    fn a_failure_kind_comes_from_the_error() {
+        let io = |kind| MediaError::Io(io::Error::from(kind));
+        let cases = [
+            (io(io::ErrorKind::NotFound), FailureKind::NotFound),
+            (io(io::ErrorKind::PermissionDenied), FailureKind::CannotRead),
+            (io(io::ErrorKind::UnexpectedEof), FailureKind::CannotRead),
+            (MediaError::UnsupportedFormat, FailureKind::NotASound),
+            (MediaError::NoAudioTrack, FailureKind::NotASound),
+            (MediaError::Empty, FailureKind::NotASound),
+            (MediaError::Decode("x".to_string()), FailureKind::Broken),
+            (MediaError::InvalidSampleRate(0), FailureKind::Other),
+            (MediaError::Resample("x".to_string()), FailureKind::Other),
+            (
+                MediaError::TooLong {
+                    limit: Duration::from_secs(1),
+                },
+                FailureKind::Other,
+            ),
+        ];
+        for (error, kind) in cases {
+            assert_eq!(failure_kind(&error), kind, "{error}");
+        }
+    }
+
+    #[test]
+    fn a_failure_says_in_japanese_which_song_and_why() {
+        let failure = |kind| BgmFailure {
+            path: Some(PathBuf::from("music").join("a.mp3")),
+            kind,
+            message: "english detail".to_string(),
+        };
+        let cases = [
+            (
+                FailureKind::NotFound,
+                "「曲 A」を再生できません：ファイルが見つかりません",
+            ),
+            (
+                FailureKind::CannotRead,
+                "「曲 A」を再生できません：ファイルを読めません",
+            ),
+            (
+                FailureKind::NotASound,
+                "「曲 A」を再生できません：音声として読めません（WAV / MP3 か確認してください）",
+            ),
+            (
+                FailureKind::Broken,
+                "「曲 A」を再生できません：音声が壊れていて、続けられません",
+            ),
+            (
+                FailureKind::Other,
+                "「曲 A」を再生できません：原因は詳細を見てください",
+            ),
+        ];
+        for (kind, expected) in cases {
+            let text = failure(kind).message_ja("曲 A");
+            assert_eq!(text, expected);
+            // The song is named by its display name, never by its path.
+            assert!(!text.contains("music") && !text.contains("a.mp3"), "{text}");
+        }
     }
 
     // -- the real thread ----------------------------------------------------
@@ -1039,6 +1158,7 @@ mod tests {
         wait_until("the player to finish", || t.bgm.controller().is_finished());
         let failure = t.bgm.take_error().unwrap();
         assert!(failure.to_string().contains("thread-missing"), "{failure}");
+        assert_eq!(failure.kind, FailureKind::NotFound);
 
         let song = TempWav::new("thread-good", RATE, &constant(QUARTER, 2_000));
         t.bgm.load(&song.0);
