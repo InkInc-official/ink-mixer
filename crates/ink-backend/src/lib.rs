@@ -30,6 +30,6 @@ pub use cpal_backend::CpalBackend;
 pub use device::{DeviceId, DeviceInfo};
 pub use error::{BackendError, Result};
 pub use stream::{
-    AudioStream, Capture, InputCallback, InputStream, MAX_FRAMES_PER_CALLBACK, OutputCallback,
-    OutputStream, Playback, StreamConfig, StreamError,
+    AudioStream, Capture, ErrorDetail, Failure, InputCallback, InputStream,
+    MAX_FRAMES_PER_CALLBACK, OutputCallback, OutputStream, Playback, StreamConfig, StreamError,
 };
