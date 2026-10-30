@@ -383,7 +383,7 @@ fn build_input_f32(
                 deliver_f32_chunks(data, channels, &mut callback);
             }
         },
-        move |error: cpal::Error| handle_stream_error(&error_status, error.kind()),
+        move |error: cpal::Error| handle_stream_error(&error_status, &error),
         None,
     )
 }
@@ -412,7 +412,7 @@ where
                 deliver_chunks(data, channels, &mut buffer, &mut callback);
             }
         },
-        move |error: cpal::Error| handle_stream_error(&error_status, error.kind()),
+        move |error: cpal::Error| handle_stream_error(&error_status, &error),
         None,
     )
 }
@@ -468,7 +468,7 @@ fn build_output_f32(
             status.record_callback(data.len() / channels);
             render_f32(&status, data, channels, &mut callback);
         },
-        move |error: cpal::Error| handle_stream_error(&error_status, error.kind()),
+        move |error: cpal::Error| handle_stream_error(&error_status, &error),
         None,
     )
 }
@@ -494,7 +494,7 @@ where
             status.record_callback(data.len() / channels);
             render_converted(&status, data, channels, &mut buffer, &mut callback);
         },
-        move |error: cpal::Error| handle_stream_error(&error_status, error.kind()),
+        move |error: cpal::Error| handle_stream_error(&error_status, &error),
         None,
     )
 }
@@ -617,11 +617,22 @@ fn detail_of(kind: cpal::ErrorKind) -> ErrorDetail {
     }
 }
 
-/// Error callback of a running stream. May run on the audio thread, so it
-/// only updates atomics: no logging and no string formatting.
-fn handle_stream_error(status: &StreamStatus, kind: cpal::ErrorKind) {
+/// Error callback of a running stream. May run on the audio thread (with
+/// `cpal` it runs on the thread that also delivers the audio data), so it only
+/// writes into places made in advance: no allocation, no logging, no
+/// formatting and no waiting. The message of the error is only borrowed.
+fn handle_stream_error(status: &StreamStatus, error: &cpal::Error) {
+    let kind = error.kind();
     match classify_error(kind) {
-        ErrorAction::Fatal(error) => status.set_failure(error, detail_of(kind)),
+        ErrorAction::Fatal(class) => {
+            // The message first: the error is recorded with `Release` after
+            // it, so whoever sees the error sees the message too. A message
+            // given after the error is ignored.
+            if let Some(message) = error.message() {
+                status.set_note(message);
+            }
+            status.set_failure(class, detail_of(kind));
+        }
         ErrorAction::Xrun => status.add_xrun(),
         ErrorAction::RealtimeDenied => status.set_realtime_denied(),
         ErrorAction::Ignore => {}
@@ -1023,15 +1034,15 @@ mod tests {
     fn stream_errors_update_status() {
         use cpal::ErrorKind;
         let status = StreamStatus::new();
-        handle_stream_error(&status, ErrorKind::Xrun);
-        handle_stream_error(&status, ErrorKind::RealtimeDenied);
-        handle_stream_error(&status, ErrorKind::DeviceChanged);
+        handle_stream_error(&status, &ErrorKind::Xrun.into());
+        handle_stream_error(&status, &ErrorKind::RealtimeDenied.into());
+        handle_stream_error(&status, &ErrorKind::DeviceChanged.into());
         assert_eq!(status.xruns(), 1);
         assert!(status.realtime_denied());
         assert_eq!(status.error(), None);
 
-        handle_stream_error(&status, ErrorKind::DeviceNotAvailable);
-        handle_stream_error(&status, ErrorKind::BackendError);
+        handle_stream_error(&status, &ErrorKind::DeviceNotAvailable.into());
+        handle_stream_error(&status, &ErrorKind::BackendError.into());
         assert_eq!(status.error(), Some(StreamError::DeviceUnavailable));
     }
 
@@ -1078,22 +1089,22 @@ mod tests {
     fn a_fatal_error_records_its_detail_and_keeps_its_class() {
         use cpal::ErrorKind;
         let status = StreamStatus::new();
-        handle_stream_error(&status, ErrorKind::BackendError);
+        handle_stream_error(&status, &ErrorKind::BackendError.into());
         assert_eq!(status.error(), Some(StreamError::Other));
         assert_eq!(status.detail(), Some(ErrorDetail::BackendError));
 
         let status = StreamStatus::new();
-        handle_stream_error(&status, ErrorKind::DeviceBusy);
+        handle_stream_error(&status, &ErrorKind::DeviceBusy.into());
         assert_eq!(status.error(), Some(StreamError::Other));
         assert_eq!(status.detail(), Some(ErrorDetail::DeviceBusy));
 
         let status = StreamStatus::new();
-        handle_stream_error(&status, ErrorKind::DeviceNotAvailable);
+        handle_stream_error(&status, &ErrorKind::DeviceNotAvailable.into());
         assert_eq!(status.error(), Some(StreamError::DeviceUnavailable));
         assert_eq!(status.detail(), Some(ErrorDetail::DeviceNotAvailable));
 
         let status = StreamStatus::new();
-        handle_stream_error(&status, ErrorKind::PermissionDenied);
+        handle_stream_error(&status, &ErrorKind::PermissionDenied.into());
         assert_eq!(status.error(), Some(StreamError::PermissionDenied));
         assert_eq!(status.detail(), Some(ErrorDetail::PermissionDenied));
     }
@@ -1102,8 +1113,8 @@ mod tests {
     fn the_first_fatal_error_keeps_its_detail() {
         use cpal::ErrorKind;
         let status = StreamStatus::new();
-        handle_stream_error(&status, ErrorKind::DeviceBusy);
-        handle_stream_error(&status, ErrorKind::BackendError);
+        handle_stream_error(&status, &ErrorKind::DeviceBusy.into());
+        handle_stream_error(&status, &ErrorKind::BackendError.into());
         assert_eq!(status.detail(), Some(ErrorDetail::DeviceBusy));
     }
 
@@ -1111,14 +1122,100 @@ mod tests {
     fn errors_that_continue_record_no_detail() {
         use cpal::ErrorKind;
         let status = StreamStatus::new();
-        handle_stream_error(&status, ErrorKind::Xrun);
-        handle_stream_error(&status, ErrorKind::RealtimeDenied);
-        handle_stream_error(&status, ErrorKind::DeviceChanged);
+        handle_stream_error(&status, &ErrorKind::Xrun.into());
+        handle_stream_error(&status, &ErrorKind::RealtimeDenied.into());
+        handle_stream_error(&status, &ErrorKind::DeviceChanged.into());
         assert_eq!(status.error(), None);
         assert_eq!(status.detail(), None);
         // A later fatal error is still recorded in full.
-        handle_stream_error(&status, ErrorKind::BackendError);
+        handle_stream_error(&status, &ErrorKind::BackendError.into());
         assert_eq!(status.detail(), Some(ErrorDetail::BackendError));
+    }
+
+    fn error_with(kind: cpal::ErrorKind, message: &'static str) -> cpal::Error {
+        cpal::Error::with_message(kind, message)
+    }
+
+    #[test]
+    fn a_fatal_error_keeps_the_message_of_the_backend() {
+        use cpal::ErrorKind;
+        for (kind, message) in [
+            (ErrorKind::BackendError, "snd_pcm_readi: Input/output error"),
+            (ErrorKind::DeviceNotAvailable, "The device was unplugged"),
+            (ErrorKind::StreamInvalidated, "デバイスが無効になりました"),
+        ] {
+            let status = StreamStatus::new();
+            handle_stream_error(&status, &error_with(kind, message));
+            let failure = status.failure().expect("the error is recorded");
+            assert_eq!(failure.note.as_deref(), Some(message), "{kind:?}");
+            assert_eq!(failure.detail, detail_of(kind));
+        }
+    }
+
+    #[test]
+    fn the_message_is_there_as_soon_as_the_error_is() {
+        use cpal::ErrorKind;
+        // Recording the error first would make the message too late: it is
+        // ignored once an error is recorded.
+        let status = StreamStatus::new();
+        handle_stream_error(&status, &error_with(ErrorKind::BackendError, "boom"));
+        assert_eq!(status.failure().unwrap().note.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn errors_that_continue_keep_no_message() {
+        use cpal::ErrorKind;
+        let status = StreamStatus::new();
+        handle_stream_error(&status, &error_with(ErrorKind::Xrun, "underrun"));
+        handle_stream_error(
+            &status,
+            &error_with(ErrorKind::RealtimeDenied, "no realtime"),
+        );
+        handle_stream_error(&status, &error_with(ErrorKind::DeviceChanged, "rerouted"));
+        assert_eq!(status.failure(), None);
+
+        // They did not take the place of the message of the fatal error.
+        handle_stream_error(&status, &ErrorKind::BackendError.into());
+        assert_eq!(status.failure().unwrap().note, None);
+        let status = StreamStatus::new();
+        handle_stream_error(&status, &error_with(ErrorKind::Xrun, "underrun"));
+        handle_stream_error(&status, &error_with(ErrorKind::BackendError, "real cause"));
+        assert_eq!(
+            status.failure().unwrap().note.as_deref(),
+            Some("real cause")
+        );
+    }
+
+    #[test]
+    fn a_fatal_error_without_a_message_has_no_note() {
+        use cpal::ErrorKind;
+        let status = StreamStatus::new();
+        handle_stream_error(&status, &ErrorKind::DeviceBusy.into());
+        let failure = status.failure().unwrap();
+        assert_eq!(failure.detail, ErrorDetail::DeviceBusy);
+        assert_eq!(failure.note, None);
+    }
+
+    #[test]
+    fn the_message_of_the_first_fatal_error_stays() {
+        use cpal::ErrorKind;
+        let status = StreamStatus::new();
+        handle_stream_error(&status, &error_with(ErrorKind::BackendError, "first"));
+        handle_stream_error(&status, &error_with(ErrorKind::DeviceBusy, "second"));
+        let failure = status.failure().unwrap();
+        assert_eq!(failure.note.as_deref(), Some("first"));
+        assert_eq!(failure.detail, ErrorDetail::BackendError);
+    }
+
+    #[test]
+    fn a_message_of_a_later_error_does_not_join_an_earlier_error_without_one() {
+        use cpal::ErrorKind;
+        let status = StreamStatus::new();
+        handle_stream_error(&status, &ErrorKind::DeviceBusy.into());
+        handle_stream_error(&status, &error_with(ErrorKind::BackendError, "later"));
+        let failure = status.failure().unwrap();
+        assert_eq!(failure.detail, ErrorDetail::DeviceBusy);
+        assert_eq!(failure.note, None);
     }
 
     fn output_chunks<T: Copy>(

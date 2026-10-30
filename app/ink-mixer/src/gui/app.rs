@@ -1129,6 +1129,7 @@ mod tests {
             side: crate::session::Side::Input,
             error: ink_backend::StreamError::DeviceUnavailable,
             detail: None,
+            note: None,
         };
         assert_eq!(
             Status::stopped_by(&e),
