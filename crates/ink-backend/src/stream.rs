@@ -6,7 +6,7 @@
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 /// The format of a stream: sample rate and number of channels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,15 +88,122 @@ impl fmt::Display for StreamError {
 
 impl std::error::Error for StreamError {}
 
+/// What the backend reported when a stream failed, kept next to the coarse
+/// [`StreamError`] so a log line can say more than "the audio stream failed".
+///
+/// It names the kind of the backend's own error (for example cpal's
+/// `ErrorKind`) without exposing the backend's type. For diagnostics only:
+/// do not branch on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorDetail {
+    /// The device is busy, for example used by another application.
+    DeviceBusy,
+    /// The device is not available.
+    DeviceNotAvailable,
+    /// The audio host (server or subsystem) is not available.
+    HostUnavailable,
+    /// An argument was invalid.
+    InvalidInput,
+    /// Access to the device was denied.
+    PermissionDenied,
+    /// An OS resource limit was reached.
+    ResourceExhausted,
+    /// The stream configuration is no longer valid.
+    StreamInvalidated,
+    /// The stream configuration is not supported.
+    UnsupportedConfig,
+    /// The operation is not supported.
+    UnsupportedOperation,
+    /// The platform's audio API returned an error the backend cannot map to
+    /// a more specific kind.
+    BackendError,
+    /// The backend reported an error that fits no other kind.
+    Other,
+    /// A kind this version does not know (a newer backend library may add
+    /// kinds), or a kind that is never fatal.
+    Unknown,
+}
+
+impl ErrorDetail {
+    /// Every kind, in code order.
+    pub const ALL: [Self; 12] = [
+        Self::DeviceBusy,
+        Self::DeviceNotAvailable,
+        Self::HostUnavailable,
+        Self::InvalidInput,
+        Self::PermissionDenied,
+        Self::ResourceExhausted,
+        Self::StreamInvalidated,
+        Self::UnsupportedConfig,
+        Self::UnsupportedOperation,
+        Self::BackendError,
+        Self::Other,
+        Self::Unknown,
+    ];
+
+    /// A short stable name for logs, such as `"backend-error"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DeviceBusy => "device-busy",
+            Self::DeviceNotAvailable => "device-not-available",
+            Self::HostUnavailable => "host-unavailable",
+            Self::InvalidInput => "invalid-input",
+            Self::PermissionDenied => "permission-denied",
+            Self::ResourceExhausted => "resource-exhausted",
+            Self::StreamInvalidated => "stream-invalidated",
+            Self::UnsupportedConfig => "unsupported-config",
+            Self::UnsupportedOperation => "unsupported-operation",
+            Self::BackendError => "backend-error",
+            Self::Other => "other",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// 1 for the first kind of [`ALL`](Self::ALL); 0 is kept for "none".
+    fn code(self) -> u8 {
+        match self {
+            Self::DeviceBusy => 1,
+            Self::DeviceNotAvailable => 2,
+            Self::HostUnavailable => 3,
+            Self::InvalidInput => 4,
+            Self::PermissionDenied => 5,
+            Self::ResourceExhausted => 6,
+            Self::StreamInvalidated => 7,
+            Self::UnsupportedConfig => 8,
+            Self::UnsupportedOperation => 9,
+            Self::BackendError => 10,
+            Self::Other => 11,
+            Self::Unknown => 12,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        let index = usize::from(code).checked_sub(1)?;
+        Self::ALL.get(index).copied()
+    }
+}
+
+impl fmt::Display for ErrorDetail {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// State written by the audio thread and read by the control thread.
 ///
 /// Only atomics, so the audio thread can update it without allocating or
 /// blocking. `Ordering::Relaxed` is enough: each value stands on its own and
 /// is not used to publish other data.
+///
+/// The fatal error and its [`ErrorDetail`] share one atomic, so the control
+/// thread can never see the error without its detail. Two atomics would need
+/// the detail written first and a release/acquire pair on the error.
 #[derive(Debug, Default)]
 pub(crate) struct StreamStatus {
-    /// 0 while there is no error, otherwise a [`StreamError`] code.
-    error: AtomicU8,
+    /// 0 while there is no error. Otherwise the [`StreamError`] code in the
+    /// high byte and the [`ErrorDetail`] code in the low byte.
+    failure: AtomicU16,
     xruns: AtomicU64,
     callbacks: AtomicU64,
     callback_frames: AtomicU32,
@@ -108,19 +215,30 @@ impl StreamStatus {
         Self::default()
     }
 
-    /// Records a fatal error. Only the first one is kept.
-    pub(crate) fn set_error(&self, error: StreamError) {
+    /// Records a fatal error and what the backend reported, in one step.
+    /// Only the first one is kept: a later call changes neither.
+    pub(crate) fn set_failure(&self, error: StreamError, detail: ErrorDetail) {
+        let packed = (u16::from(error.code()) << 8) | u16::from(detail.code());
         let _ = self
-            .error
-            .compare_exchange(0, error.code(), Ordering::Relaxed, Ordering::Relaxed);
+            .failure
+            .compare_exchange(0, packed, Ordering::Relaxed, Ordering::Relaxed);
     }
 
     pub(crate) fn error(&self) -> Option<StreamError> {
-        StreamError::from_code(self.error.load(Ordering::Relaxed))
+        let packed = self.failure.load(Ordering::Relaxed);
+        StreamError::from_code((packed >> 8) as u8)
+    }
+
+    /// The detail of the fatal error. `Some` whenever [`error`](Self::error)
+    /// is `Some`: the value goes from 0 to its final form once and never
+    /// changes, so a later load cannot see less than an earlier one.
+    pub(crate) fn detail(&self) -> Option<ErrorDetail> {
+        let packed = self.failure.load(Ordering::Relaxed);
+        ErrorDetail::from_code((packed & 0xff) as u8)
     }
 
     pub(crate) fn has_error(&self) -> bool {
-        self.error.load(Ordering::Relaxed) != 0
+        self.failure.load(Ordering::Relaxed) != 0
     }
 
     pub(crate) fn add_xrun(&self) {
@@ -225,6 +343,13 @@ impl<D> AudioStream<D> {
         self.status.error()
     }
 
+    /// Returns what the backend reported for the fatal error, if one
+    /// occurred. `Some` whenever [`error`](Self::error) is `Some`. For log
+    /// lines; do not branch on it.
+    pub fn error_detail(&self) -> Option<ErrorDetail> {
+        self.status.detail()
+    }
+
     /// Returns how many overruns the backend reported.
     pub fn xruns(&self) -> u64 {
         self.status.xruns()
@@ -291,10 +416,98 @@ mod tests {
     #[test]
     fn first_error_is_kept() {
         let status = StreamStatus::new();
-        status.set_error(StreamError::DeviceUnavailable);
-        status.set_error(StreamError::Other);
+        status.set_failure(
+            StreamError::DeviceUnavailable,
+            ErrorDetail::DeviceNotAvailable,
+        );
+        status.set_failure(StreamError::Other, ErrorDetail::BackendError);
         assert_eq!(status.error(), Some(StreamError::DeviceUnavailable));
         assert!(status.has_error());
+    }
+
+    #[test]
+    fn new_status_has_no_detail() {
+        let status = StreamStatus::new();
+        assert_eq!(status.detail(), None);
+    }
+
+    #[test]
+    fn failure_keeps_error_and_detail_together() {
+        let status = StreamStatus::new();
+        status.set_failure(StreamError::Other, ErrorDetail::BackendError);
+        assert_eq!(status.error(), Some(StreamError::Other));
+        assert_eq!(status.detail(), Some(ErrorDetail::BackendError));
+        assert!(status.has_error());
+    }
+
+    #[test]
+    fn first_failure_keeps_its_detail() {
+        let status = StreamStatus::new();
+        status.set_failure(StreamError::DeviceUnavailable, ErrorDetail::DeviceBusy);
+        status.set_failure(StreamError::Other, ErrorDetail::BackendError);
+        status.set_failure(StreamError::PermissionDenied, ErrorDetail::PermissionDenied);
+        assert_eq!(status.error(), Some(StreamError::DeviceUnavailable));
+        assert_eq!(status.detail(), Some(ErrorDetail::DeviceBusy));
+    }
+
+    #[test]
+    fn unknown_detail_is_a_detail_not_none() {
+        let status = StreamStatus::new();
+        status.set_failure(StreamError::Other, ErrorDetail::Unknown);
+        assert_eq!(status.error(), Some(StreamError::Other));
+        assert_eq!(status.detail(), Some(ErrorDetail::Unknown));
+    }
+
+    #[test]
+    fn every_detail_survives_the_round_trip() {
+        for detail in ErrorDetail::ALL {
+            let status = StreamStatus::new();
+            status.set_failure(StreamError::Other, detail);
+            assert_eq!(status.detail(), Some(detail), "{detail}");
+        }
+    }
+
+    #[test]
+    fn detail_codes_are_in_order_and_zero_is_none() {
+        assert_eq!(ErrorDetail::from_code(0), None);
+        assert_eq!(ErrorDetail::from_code(13), None);
+        for (index, detail) in ErrorDetail::ALL.into_iter().enumerate() {
+            assert_eq!(usize::from(detail.code()), index + 1, "{detail}");
+        }
+    }
+
+    #[test]
+    fn detail_names_are_distinct_lowercase_words() {
+        let names: Vec<&str> = ErrorDetail::ALL.iter().map(|d| d.as_str()).collect();
+        for (index, name) in names.iter().enumerate() {
+            assert!(!name.is_empty());
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "{name}"
+            );
+            assert!(!names[..index].contains(name), "{name} appears twice");
+        }
+        assert_eq!(ErrorDetail::BackendError.to_string(), "backend-error");
+    }
+
+    /// The control thread must never see the error without its detail, even
+    /// while the audio thread is writing it.
+    #[test]
+    fn error_is_never_seen_without_its_detail() {
+        for _ in 0..2_000 {
+            let status = Arc::new(StreamStatus::new());
+            let writer = {
+                let status = Arc::clone(&status);
+                std::thread::spawn(move || {
+                    status.set_failure(StreamError::Other, ErrorDetail::BackendError);
+                })
+            };
+            while status.error().is_none() {
+                std::hint::spin_loop();
+            }
+            assert_eq!(status.detail(), Some(ErrorDetail::BackendError));
+            writer.join().unwrap();
+        }
     }
 
     #[test]
@@ -325,13 +538,15 @@ mod tests {
         let status = Arc::new(StreamStatus::new());
         let stream = AudioStream::<D>::new(Box::new(()), Arc::clone(&status), CONFIG, "i16");
         status.record_callback(256);
-        status.set_error(StreamError::PermissionDenied);
+        assert_eq!(stream.error_detail(), None);
+        status.set_failure(StreamError::PermissionDenied, ErrorDetail::PermissionDenied);
 
         assert_eq!(stream.config(), CONFIG);
         assert_eq!(stream.sample_format(), "i16");
         assert_eq!(stream.callbacks(), 1);
         assert_eq!(stream.callback_frames(), 256);
         assert_eq!(stream.error(), Some(StreamError::PermissionDenied));
+        assert_eq!(stream.error_detail(), Some(ErrorDetail::PermissionDenied));
     }
 
     #[test]

@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ink_backend::{
-    AudioBackend, BackendError, DeviceId, DeviceInfo, InputStream, MAX_FRAMES_PER_CALLBACK,
-    OutputStream, StreamConfig, StreamError,
+    AudioBackend, AudioStream, BackendError, DeviceId, DeviceInfo, ErrorDetail, InputStream,
+    MAX_FRAMES_PER_CALLBACK, OutputStream, StreamConfig, StreamError,
 };
 use ink_core::Config;
 use ink_core::graph::{
@@ -63,8 +63,14 @@ impl Side {
 /// Why a running session has to stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionError {
-    /// The backend reported a fatal error of the stream.
-    Stream { side: Side, error: StreamError },
+    /// The backend reported a fatal error of the stream. `detail` is what the
+    /// backend reported (for the log line); it is `Some` for every error of
+    /// a real stream.
+    Stream {
+        side: Side,
+        error: StreamError,
+        detail: Option<ErrorDetail>,
+    },
     /// The stream delivered no callback for [`STALL`] (some systems report
     /// nothing when a device is unplugged).
     Stalled { side: Side },
@@ -75,7 +81,7 @@ impl SessionError {
     /// [`Display`](fmt::Display) text is meant for logs and the CLI.
     pub fn message_ja(&self) -> String {
         match self {
-            Self::Stream { side, error } => {
+            Self::Stream { side, error, .. } => {
                 let side = side.name_ja();
                 match error {
                     StreamError::DeviceUnavailable => {
@@ -99,7 +105,17 @@ impl SessionError {
 impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Stream { side, error } => write!(f, "{} stream stopped: {error}", side.name()),
+            Self::Stream {
+                side,
+                error,
+                detail,
+            } => {
+                write!(f, "{} stream stopped: {error}", side.name())?;
+                match detail {
+                    Some(detail) => write!(f, " ({detail})"),
+                    None => Ok(()),
+                }
+            }
             Self::Stalled { side } => write!(
                 f,
                 "{} stopped: no callback for {} s (device unplugged?)",
@@ -245,13 +261,9 @@ impl AudioSession {
     /// (some systems report nothing when a device is unplugged).
     pub fn check(&mut self, now: Instant) -> Result<(), SessionError> {
         self.watch_input
-            .check(Side::Input, self.input.error(), self.input.callbacks(), now)?;
-        self.watch_output.check(
-            Side::Output,
-            self.output.error(),
-            self.output.callbacks(),
-            now,
-        )
+            .check_stream(Side::Input, &self.input, now)?;
+        self.watch_output
+            .check_stream(Side::Output, &self.output, now)
     }
 
     /// Returns the input stream.
@@ -571,15 +583,37 @@ impl Watch {
         }
     }
 
+    /// Checks one stream. Both sides go through here, so the error and its
+    /// detail are read the same way for the input and the output.
+    fn check_stream<D>(
+        &mut self,
+        side: Side,
+        stream: &AudioStream<D>,
+        now: Instant,
+    ) -> Result<(), SessionError> {
+        self.check(
+            side,
+            stream.error(),
+            stream.error_detail(),
+            stream.callbacks(),
+            now,
+        )
+    }
+
     fn check(
         &mut self,
         side: Side,
         error: Option<StreamError>,
+        detail: Option<ErrorDetail>,
         callbacks: u64,
         now: Instant,
     ) -> Result<(), SessionError> {
         if let Some(error) = error {
-            return Err(SessionError::Stream { side, error });
+            return Err(SessionError::Stream {
+                side,
+                error,
+                detail,
+            });
         }
         if callbacks != self.callbacks {
             self.callbacks = callbacks;
@@ -883,12 +917,57 @@ mod tests {
     fn watch_reports_a_stream_error() {
         let t0 = Instant::now();
         let mut watch = Watch::new(t0);
-        let result = watch.check(Side::Input, Some(StreamError::DeviceUnavailable), 5, t0);
+        let result = watch.check(
+            Side::Input,
+            Some(StreamError::DeviceUnavailable),
+            Some(ErrorDetail::DeviceNotAvailable),
+            5,
+            t0,
+        );
         assert_eq!(
             result.unwrap_err(),
             SessionError::Stream {
                 side: Side::Input,
-                error: StreamError::DeviceUnavailable
+                error: StreamError::DeviceUnavailable,
+                detail: Some(ErrorDetail::DeviceNotAvailable),
+            }
+        );
+    }
+
+    #[test]
+    fn watch_carries_the_detail_for_both_sides() {
+        let t0 = Instant::now();
+        for side in [Side::Input, Side::Output] {
+            let mut watch = Watch::new(t0);
+            let result = watch.check(
+                side,
+                Some(StreamError::Other),
+                Some(ErrorDetail::BackendError),
+                5,
+                t0,
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                SessionError::Stream {
+                    side,
+                    error: StreamError::Other,
+                    detail: Some(ErrorDetail::BackendError),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn watch_passes_on_a_missing_detail_as_it_is() {
+        let t0 = Instant::now();
+        let mut watch = Watch::new(t0);
+        let result = watch.check(Side::Output, Some(StreamError::Other), None, 5, t0);
+        assert_eq!(
+            result.unwrap_err(),
+            SessionError::Stream {
+                side: Side::Output,
+                error: StreamError::Other,
+                detail: None,
             }
         );
     }
@@ -899,7 +978,7 @@ mod tests {
         let mut watch = Watch::new(t0);
         for k in 1..=30u64 {
             let now = t0 + Duration::from_millis(100 * k);
-            assert!(watch.check(Side::Output, None, k, now).is_ok());
+            assert!(watch.check(Side::Output, None, None, k, now).is_ok());
         }
     }
 
@@ -907,11 +986,11 @@ mod tests {
     fn watch_reports_callbacks_that_stopped_for_a_second() {
         let t0 = Instant::now();
         let mut watch = Watch::new(t0);
-        assert!(watch.check(Side::Output, None, 10, t0).is_ok());
+        assert!(watch.check(Side::Output, None, None, 10, t0).is_ok());
         let soon = t0 + Duration::from_millis(900);
-        assert!(watch.check(Side::Output, None, 10, soon).is_ok());
+        assert!(watch.check(Side::Output, None, None, 10, soon).is_ok());
         let late = t0 + Duration::from_secs(1);
-        let result = watch.check(Side::Output, None, 10, late);
+        let result = watch.check(Side::Output, None, None, 10, late);
         assert_eq!(
             result.unwrap_err(),
             SessionError::Stalled { side: Side::Output }
@@ -923,6 +1002,7 @@ mod tests {
         let lost = SessionError::Stream {
             side: Side::Input,
             error: StreamError::DeviceUnavailable,
+            detail: None,
         };
         assert_eq!(
             lost.to_string(),
@@ -937,8 +1017,67 @@ mod tests {
     }
 
     #[test]
+    fn a_detail_shows_in_parentheses_after_the_english_text() {
+        let failed = SessionError::Stream {
+            side: Side::Output,
+            error: StreamError::Other,
+            detail: Some(ErrorDetail::BackendError),
+        };
+        assert_eq!(
+            failed.to_string(),
+            "output stream stopped: the audio stream failed (backend-error)"
+        );
+        let busy = SessionError::Stream {
+            side: Side::Input,
+            error: StreamError::Other,
+            detail: Some(ErrorDetail::DeviceBusy),
+        };
+        assert_eq!(
+            busy.to_string(),
+            "input stream stopped: the audio stream failed (device-busy)"
+        );
+        // A kind this version cannot name is still shown, so it is not
+        // mistaken for "nothing was recorded".
+        let unknown = SessionError::Stream {
+            side: Side::Output,
+            error: StreamError::Other,
+            detail: Some(ErrorDetail::Unknown),
+        };
+        assert_eq!(
+            unknown.to_string(),
+            "output stream stopped: the audio stream failed (unknown)"
+        );
+        // Without a detail the text is what it was before.
+        let none = SessionError::Stream {
+            side: Side::Output,
+            error: StreamError::Other,
+            detail: None,
+        };
+        assert_eq!(
+            none.to_string(),
+            "output stream stopped: the audio stream failed"
+        );
+    }
+
+    #[test]
+    fn the_japanese_line_does_not_change_with_the_detail() {
+        for detail in std::iter::once(None).chain(ErrorDetail::ALL.into_iter().map(Some)) {
+            let failed = SessionError::Stream {
+                side: Side::Output,
+                error: StreamError::Other,
+                detail,
+            };
+            assert_eq!(failed.message_ja(), "出力のストリームが止まりました");
+        }
+    }
+
+    #[test]
     fn errors_have_a_japanese_line_for_each_kind() {
-        let stream = |side, error| SessionError::Stream { side, error };
+        let stream = |side, error| SessionError::Stream {
+            side,
+            error,
+            detail: None,
+        };
         assert_eq!(
             stream(Side::Input, StreamError::DeviceUnavailable).message_ja(),
             "入力のデバイスが使えなくなりました（USB を抜きましたか？）"

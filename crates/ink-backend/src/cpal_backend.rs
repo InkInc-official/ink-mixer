@@ -10,7 +10,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, I24, Sample, SampleFormat, SizedSample, U24};
 use tracing::debug;
 
-use crate::stream::StreamStatus;
+use crate::stream::{ErrorDetail, StreamStatus};
 use crate::{
     AudioBackend, AudioStream, BackendError, DeviceId, DeviceInfo, InputCallback, InputStream,
     MAX_FRAMES_PER_CALLBACK, OutputCallback, OutputStream, Result, StreamConfig, StreamError,
@@ -596,11 +596,32 @@ fn classify_error(kind: cpal::ErrorKind) -> ErrorAction {
     }
 }
 
+/// Names the kind of an error reported by `cpal`, for the log line of a fatal
+/// error. A kind `cpal` may add later, and the kinds that are never fatal
+/// ([`classify_error`] continues after them), become `Unknown`.
+fn detail_of(kind: cpal::ErrorKind) -> ErrorDetail {
+    use cpal::ErrorKind;
+    match kind {
+        ErrorKind::DeviceBusy => ErrorDetail::DeviceBusy,
+        ErrorKind::DeviceNotAvailable => ErrorDetail::DeviceNotAvailable,
+        ErrorKind::HostUnavailable => ErrorDetail::HostUnavailable,
+        ErrorKind::InvalidInput => ErrorDetail::InvalidInput,
+        ErrorKind::PermissionDenied => ErrorDetail::PermissionDenied,
+        ErrorKind::ResourceExhausted => ErrorDetail::ResourceExhausted,
+        ErrorKind::StreamInvalidated => ErrorDetail::StreamInvalidated,
+        ErrorKind::UnsupportedConfig => ErrorDetail::UnsupportedConfig,
+        ErrorKind::UnsupportedOperation => ErrorDetail::UnsupportedOperation,
+        ErrorKind::BackendError => ErrorDetail::BackendError,
+        ErrorKind::Other => ErrorDetail::Other,
+        _ => ErrorDetail::Unknown,
+    }
+}
+
 /// Error callback of a running stream. May run on the audio thread, so it
 /// only updates atomics: no logging and no string formatting.
 fn handle_stream_error(status: &StreamStatus, kind: cpal::ErrorKind) {
     match classify_error(kind) {
-        ErrorAction::Fatal(error) => status.set_error(error),
+        ErrorAction::Fatal(error) => status.set_failure(error, detail_of(kind)),
         ErrorAction::Xrun => status.add_xrun(),
         ErrorAction::RealtimeDenied => status.set_realtime_denied(),
         ErrorAction::Ignore => {}
@@ -1014,6 +1035,92 @@ mod tests {
         assert_eq!(status.error(), Some(StreamError::DeviceUnavailable));
     }
 
+    #[test]
+    fn every_fatal_kind_has_its_name() {
+        use cpal::ErrorKind;
+        let table = [
+            (ErrorKind::DeviceBusy, ErrorDetail::DeviceBusy),
+            (
+                ErrorKind::DeviceNotAvailable,
+                ErrorDetail::DeviceNotAvailable,
+            ),
+            (ErrorKind::HostUnavailable, ErrorDetail::HostUnavailable),
+            (ErrorKind::InvalidInput, ErrorDetail::InvalidInput),
+            (ErrorKind::PermissionDenied, ErrorDetail::PermissionDenied),
+            (ErrorKind::ResourceExhausted, ErrorDetail::ResourceExhausted),
+            (ErrorKind::StreamInvalidated, ErrorDetail::StreamInvalidated),
+            (ErrorKind::UnsupportedConfig, ErrorDetail::UnsupportedConfig),
+            (
+                ErrorKind::UnsupportedOperation,
+                ErrorDetail::UnsupportedOperation,
+            ),
+            (ErrorKind::BackendError, ErrorDetail::BackendError),
+            (ErrorKind::Other, ErrorDetail::Other),
+        ];
+        for (kind, expected) in table {
+            assert_eq!(detail_of(kind), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn kinds_that_continue_have_no_name_of_their_own() {
+        use cpal::ErrorKind;
+        for kind in [
+            ErrorKind::Xrun,
+            ErrorKind::RealtimeDenied,
+            ErrorKind::DeviceChanged,
+        ] {
+            assert_eq!(detail_of(kind), ErrorDetail::Unknown, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_fatal_error_records_its_detail_and_keeps_its_class() {
+        use cpal::ErrorKind;
+        let status = StreamStatus::new();
+        handle_stream_error(&status, ErrorKind::BackendError);
+        assert_eq!(status.error(), Some(StreamError::Other));
+        assert_eq!(status.detail(), Some(ErrorDetail::BackendError));
+
+        let status = StreamStatus::new();
+        handle_stream_error(&status, ErrorKind::DeviceBusy);
+        assert_eq!(status.error(), Some(StreamError::Other));
+        assert_eq!(status.detail(), Some(ErrorDetail::DeviceBusy));
+
+        let status = StreamStatus::new();
+        handle_stream_error(&status, ErrorKind::DeviceNotAvailable);
+        assert_eq!(status.error(), Some(StreamError::DeviceUnavailable));
+        assert_eq!(status.detail(), Some(ErrorDetail::DeviceNotAvailable));
+
+        let status = StreamStatus::new();
+        handle_stream_error(&status, ErrorKind::PermissionDenied);
+        assert_eq!(status.error(), Some(StreamError::PermissionDenied));
+        assert_eq!(status.detail(), Some(ErrorDetail::PermissionDenied));
+    }
+
+    #[test]
+    fn the_first_fatal_error_keeps_its_detail() {
+        use cpal::ErrorKind;
+        let status = StreamStatus::new();
+        handle_stream_error(&status, ErrorKind::DeviceBusy);
+        handle_stream_error(&status, ErrorKind::BackendError);
+        assert_eq!(status.detail(), Some(ErrorDetail::DeviceBusy));
+    }
+
+    #[test]
+    fn errors_that_continue_record_no_detail() {
+        use cpal::ErrorKind;
+        let status = StreamStatus::new();
+        handle_stream_error(&status, ErrorKind::Xrun);
+        handle_stream_error(&status, ErrorKind::RealtimeDenied);
+        handle_stream_error(&status, ErrorKind::DeviceChanged);
+        assert_eq!(status.error(), None);
+        assert_eq!(status.detail(), None);
+        // A later fatal error is still recorded in full.
+        handle_stream_error(&status, ErrorKind::BackendError);
+        assert_eq!(status.detail(), Some(ErrorDetail::BackendError));
+    }
+
     fn output_chunks<T: Copy>(
         status: &StreamStatus,
         data: &mut [T],
@@ -1119,7 +1226,10 @@ mod tests {
     #[test]
     fn output_is_silent_after_fatal_error() {
         let status = StreamStatus::new();
-        status.set_error(StreamError::DeviceUnavailable);
+        status.set_failure(
+            StreamError::DeviceUnavailable,
+            ErrorDetail::DeviceNotAvailable,
+        );
         let mut called = false;
 
         let mut data = [9.0_f32; 4];

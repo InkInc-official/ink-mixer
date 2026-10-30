@@ -1128,6 +1128,7 @@ mod tests {
         let e = SessionError::Stream {
             side: crate::session::Side::Input,
             error: ink_backend::StreamError::DeviceUnavailable,
+            detail: None,
         };
         assert_eq!(
             Status::stopped_by(&e),
